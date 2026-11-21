@@ -33,6 +33,12 @@ bool IsPlatformCompiled(NativePlatform platform) noexcept {
 #else
             return false;
 #endif
+        case NativePlatform::Emscripten:
+#if defined(GUIKIT_NATIVE_HAS_EMSCRIPTEN) && GUIKIT_NATIVE_HAS_EMSCRIPTEN
+            return true;
+#else
+            return false;
+#endif
     }
     return false;
 }
@@ -53,7 +59,9 @@ bool IsRendererCompiled(NativeRenderer renderer) noexcept {
 }
 
 keel::StringRef GetBackendSummary() noexcept {
-#if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
+#if defined(GUIKIT_NATIVE_HAS_EMSCRIPTEN) && GUIKIT_NATIVE_HAS_EMSCRIPTEN
+    return "GuiKit Native Backend (Emscripten + WebGL 2.0)";
+#elif defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
     return "GuiKit Native Backend (Win32 + WGL + OpenGL 3.3 Core)";
 #elif defined(GUIKIT_NATIVE_HAS_X11) && GUIKIT_NATIVE_HAS_X11
     return "GuiKit Native Backend (X11 + EGL + OpenGL ES 3.0)";
@@ -78,7 +86,18 @@ keel::UniquePtr<IPlatformWindow> CreateWin32PlatformWindow() {
 #endif
 }
 
+keel::UniquePtr<IPlatformWindow> CreateEmscriptenPlatformWindow() {
+#if defined(GUIKIT_NATIVE_HAS_EMSCRIPTEN) && GUIKIT_NATIVE_HAS_EMSCRIPTEN
+    return keel::make_unique<EmscriptenPlatformWindow>();
+#else
+    return nullptr;
+#endif
+}
+
 keel::UniquePtr<IPlatformWindow> CreateNativePlatformWindow(NativePlatform platform) {
+    if (platform == NativePlatform::Emscripten) {
+        return CreateEmscriptenPlatformWindow();
+    }
     if (platform == NativePlatform::Win32) {
         return CreateWin32PlatformWindow();
     }
@@ -86,6 +105,11 @@ keel::UniquePtr<IPlatformWindow> CreateNativePlatformWindow(NativePlatform platf
         return CreateX11PlatformWindow();
     }
     if (platform == NativePlatform::Auto) {
+#if defined(GUIKIT_NATIVE_HAS_EMSCRIPTEN) && GUIKIT_NATIVE_HAS_EMSCRIPTEN
+        if (EmscriptenPlatformWindow::IsRuntimeAvailable()) {
+            return keel::make_unique<EmscriptenPlatformWindow>();
+        }
+#endif
 #if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
         if (Win32PlatformWindow::IsRuntimeAvailable()) {
             return keel::make_unique<Win32PlatformWindow>();

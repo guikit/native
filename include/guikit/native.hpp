@@ -1,11 +1,12 @@
 #pragma once
 
 // ==============================================================================
-// GuiKit Native Backend Module (X11 / Wayland / Win32 + OpenGL ES3 / GL3)
+// GuiKit Native Backend Module (X11 / Wayland / Win32 / Emscripten + GLES3 / GL3 / WebGL2)
 // Zero SDL3, Zero ThorVG — Built on guikit::core + optional guikit::text
 // ==============================================================================
 
 #include "guikit/core.hpp"
+#include "guikit/native/emscripten_platform_window.hpp"
 #include "guikit/native/gl_es3_canvas.hpp"
 #include "guikit/native/win32_platform_window.hpp"
 #include "guikit/native/x11_platform_window.hpp"
@@ -18,7 +19,8 @@ enum class NativePlatform : keel::u8 {
     Headless = 1,
     X11 = 2,
     Wayland = 3,
-    Win32 = 4
+    Win32 = 4,
+    Emscripten = 5
 };
 
 /// Native GPU/2D rendering backends supported by `guikit::native`.
@@ -42,6 +44,9 @@ enum class NativeRenderer : keel::u8 {
 
 /// Creates a Win32 + WGL OpenGL 3.3 Core `IPlatformWindow` instance (returns `nullptr` on non-Windows builds).
 [[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateWin32PlatformWindow();
+
+/// Creates an Emscripten HTML5 Canvas + WebGL 2.0 `IPlatformWindow` instance (returns `nullptr` on non-WASM builds).
+[[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateEmscriptenPlatformWindow();
 
 /// Creates a native `IPlatformWindow` matching `platform` (`Auto` probes runtime availability).
 [[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateNativePlatformWindow(

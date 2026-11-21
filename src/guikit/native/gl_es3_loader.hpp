@@ -2,7 +2,11 @@
 
 #include "guikit/backend/i_platform_window.hpp"
 #include "keel/core.h"
+#if defined(__EMSCRIPTEN__)
+#include <GLES3/gl3.h>
+#else
 #include "keel/dynlib.h"
+#endif
 
 namespace guikit::native::detail {
 
@@ -96,7 +100,9 @@ static constexpr GLenum kGlRenderer = 0x1F01u;
 static constexpr GLenum kGlVersion = 0x1F02u;
 
 struct GlEs3Api {
+#if !defined(__EMSCRIPTEN__)
     keel::DynLib fallbackLib;
+#endif
 
     using PfnGetString = const GLubyte*(GUIKIT_GL_APIENTRY*)(GLenum name);
     using PfnGetError = GLenum(GUIKIT_GL_APIENTRY*)();
@@ -238,6 +244,12 @@ struct GlEs3Api {
 
     template <typename Fn>
     bool LoadFn(GlProcAddressFn procLoader, const char* name, Fn& out) noexcept {
+#if defined(__EMSCRIPTEN__)
+        (void)procLoader;
+        (void)name;
+        (void)out;
+        return false;
+#else
         void* raw = procLoader ? procLoader(name) : nullptr;
         if (!raw && fallbackLib.is_open()) {
             raw = fallbackLib.symbol_raw(name);
@@ -248,12 +260,84 @@ struct GlEs3Api {
         }
         keel::mem_copy(&out, &raw, sizeof(out));
         return true;
+#endif
     }
 
     bool Load(GlProcAddressFn procLoader) noexcept {
         if (!procLoader) {
             return false;
         }
+#if defined(__EMSCRIPTEN__)
+        GetString = ::glGetString;
+        GetError = ::glGetError;
+        GetIntegerv = ::glGetIntegerv;
+        GetFramebufferAttachmentParameteriv = ::glGetFramebufferAttachmentParameteriv;
+        Viewport = ::glViewport;
+        Scissor = ::glScissor;
+        Enable = ::glEnable;
+        Disable = ::glDisable;
+        ClearColor = ::glClearColor;
+        ClearStencil = ::glClearStencil;
+        Clear = ::glClear;
+        ColorMask = ::glColorMask;
+        StencilFunc = ::glStencilFunc;
+        StencilOp = ::glStencilOp;
+        StencilOpSeparate = ::glStencilOpSeparate;
+        StencilMask = ::glStencilMask;
+        BlendFuncSeparate = ::glBlendFuncSeparate;
+        BlendColor = ::glBlendColor;
+        BlendEquation = ::glBlendEquation;
+        PixelStorei = ::glPixelStorei;
+
+        CreateShader = ::glCreateShader;
+        ShaderSource = ::glShaderSource;
+        CompileShader = ::glCompileShader;
+        GetShaderiv = ::glGetShaderiv;
+        GetShaderInfoLog = ::glGetShaderInfoLog;
+        DeleteShader = ::glDeleteShader;
+
+        CreateProgram = ::glCreateProgram;
+        AttachShader = ::glAttachShader;
+        LinkProgram = ::glLinkProgram;
+        GetProgramiv = ::glGetProgramiv;
+        GetProgramInfoLog = ::glGetProgramInfoLog;
+        UseProgram = ::glUseProgram;
+        DeleteProgram = ::glDeleteProgram;
+
+        GetUniformLocation = ::glGetUniformLocation;
+        Uniform1i = ::glUniform1i;
+        Uniform1f = ::glUniform1f;
+        Uniform2f = ::glUniform2f;
+        Uniform3f = ::glUniform3f;
+        Uniform4f = ::glUniform4f;
+        Uniform4fv = ::glUniform4fv;
+
+        GenVertexArrays = ::glGenVertexArrays;
+        BindVertexArray = ::glBindVertexArray;
+        DeleteVertexArrays = ::glDeleteVertexArrays;
+
+        GenBuffers = ::glGenBuffers;
+        BindBuffer = ::glBindBuffer;
+        BufferData = ::glBufferData;
+        BufferSubData = ::glBufferSubData;
+        DeleteBuffers = ::glDeleteBuffers;
+
+        EnableVertexAttribArray = ::glEnableVertexAttribArray;
+        VertexAttribPointer = ::glVertexAttribPointer;
+        VertexAttribDivisor = ::glVertexAttribDivisor;
+
+        DrawArrays = ::glDrawArrays;
+        DrawArraysInstanced = ::glDrawArraysInstanced;
+
+        GenTextures = ::glGenTextures;
+        BindTexture = ::glBindTexture;
+        ActiveTexture = ::glActiveTexture;
+        TexParameteri = ::glTexParameteri;
+        TexImage2D = ::glTexImage2D;
+        TexSubImage2D = ::glTexSubImage2D;
+        DeleteTextures = ::glDeleteTextures;
+        return true;
+#else
 #if defined(_WIN32)
         if (auto lib = keel::DynLib::open("opengl32.dll")) {
             fallbackLib = keel::move(*lib);
@@ -335,6 +419,7 @@ struct GlEs3Api {
         ok = LoadFn(procLoader, "glTexSubImage2D", TexSubImage2D) && ok;
         ok = LoadFn(procLoader, "glDeleteTextures", DeleteTextures) && ok;
         return ok;
+#endif
     }
 };
 

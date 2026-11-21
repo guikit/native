@@ -33,6 +33,7 @@ else()
 endif()
 
 add_library(guikit_native STATIC
+    src/guikit/native/emscripten_platform_window.cpp
     src/guikit/native/gl_es3_canvas.cpp
     src/guikit/native/win32_platform_window.cpp
     src/guikit/native/x11_platform_window.cpp
@@ -47,10 +48,12 @@ target_include_directories(guikit_native PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_ES3=1)
-if (WIN32)
+if (EMSCRIPTEN)
+    target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_EMSCRIPTEN=1)
+elseif (WIN32)
     target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_WIN32=1)
     target_link_libraries(guikit_native PRIVATE user32 gdi32 opengl32 shell32)
-elseif (UNIX AND NOT APPLE AND NOT ANDROID AND NOT EMSCRIPTEN)
+elseif (UNIX AND NOT APPLE AND NOT ANDROID)
     target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_X11=1)
 endif()
 target_link_libraries(guikit_native PUBLIC guikit::core)

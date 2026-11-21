@@ -25,6 +25,12 @@ int main() {
     CHECK(IsRendererCompiled(NativeRenderer::Null));
     CHECK(IsRendererCompiled(NativeRenderer::OpenGLES3));
     CHECK(!GetBackendSummary().empty());
+#if defined(__EMSCRIPTEN__)
+    CHECK(IsPlatformCompiled(NativePlatform::Emscripten));
+#else
+    CHECK(!IsPlatformCompiled(NativePlatform::Emscripten));
+    CHECK(CreateEmscriptenPlatformWindow() == nullptr);
+#endif
 
     // 2. GlEs3Canvas handles null procLoader gracefully without crashing
     {

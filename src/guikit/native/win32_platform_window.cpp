@@ -82,8 +82,8 @@ template <typename Fn, typename RawProc>
 void* WglProcLoaderThunk(const char* name) noexcept {
     if (!name) return nullptr;
     PROC raw = ::wglGetProcAddress(name);
-    const keel::uptr addr = reinterpret_cast<keel::uptr>(raw);
-    if (addr == 0u || addr == 1u || addr == 2u || addr == 3u || addr == ~keel::uptr{0}) {
+    const keel::usize addr = reinterpret_cast<keel::usize>(raw);
+    if (addr == 0u || addr == 1u || addr == 2u || addr == 3u || addr == ~keel::usize{0}) {
         if (!g_opengl32Module) {
             g_opengl32Module = ::GetModuleHandleW(L"opengl32.dll");
             if (!g_opengl32Module) {

@@ -846,6 +846,7 @@ struct GlEs3Canvas::Impl {
                 msaaSamples = keel::as<keel::i32>(samples);
             }
         }
+#if !defined(__EMSCRIPTEN__)
         if (gl.GetFramebufferAttachmentParameteriv) {
             while (gl.GetError() != 0u) {}
             GLint bits = 0;
@@ -856,6 +857,7 @@ struct GlEs3Canvas::Impl {
                 stencilBits = keel::as<keel::i32>(bits);
             }
         }
+#endif
         if (stencilBits == 0 && gl.GetIntegerv) {
             while (gl.GetError() != 0u) {}
             GLint bits = 0;
@@ -1505,9 +1507,13 @@ void GlEs3Canvas::PopTransform() {
 }
 
 keel::StringRef GlEs3Canvas::GetBackendName() const noexcept {
+#if defined(__EMSCRIPTEN__)
+    return keel::StringRef("WebGL 2.0 (Native GPU)");
+#else
     return (m_impl && m_impl->isDesktopGl)
         ? keel::StringRef("OpenGL 3.3 Core (Native GPU)")
         : keel::StringRef("OpenGL ES 3.0 (Native GPU)");
+#endif
 }
 
 void GlEs3Canvas::Clear(Color color, keel::Optional<Rect> rect) {
