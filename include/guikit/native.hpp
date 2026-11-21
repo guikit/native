@@ -7,6 +7,7 @@
 
 #include "guikit/core.hpp"
 #include "guikit/native/gl_es3_canvas.hpp"
+#include "guikit/native/win32_platform_window.hpp"
 #include "guikit/native/x11_platform_window.hpp"
 
 namespace guikit::native {
@@ -38,6 +39,9 @@ enum class NativeRenderer : keel::u8 {
 
 /// Creates an X11 + EGL `IPlatformWindow` instance (returns `nullptr` on non-X11 builds).
 [[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateX11PlatformWindow();
+
+/// Creates a Win32 + WGL OpenGL 3.3 Core `IPlatformWindow` instance (returns `nullptr` on non-Windows builds).
+[[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateWin32PlatformWindow();
 
 /// Creates a native `IPlatformWindow` matching `platform` (`Auto` probes runtime availability).
 [[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateNativePlatformWindow(

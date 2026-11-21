@@ -56,7 +56,9 @@ bool IsRendererCompiled(NativeRenderer renderer) noexcept {
 }
 
 keel::StringRef GetBackendSummary() noexcept {
-#if defined(GUIKIT_NATIVE_HAS_X11) && GUIKIT_NATIVE_HAS_X11
+#if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
+    return "GuiKit Native Backend (Win32 + WGL + OpenGL 3.3 Core)";
+#elif defined(GUIKIT_NATIVE_HAS_X11) && GUIKIT_NATIVE_HAS_X11
     return "GuiKit Native Backend (X11 + EGL + OpenGL ES 3.0)";
 #else
     return "GuiKit Native Backend (OpenGL ES 3.0)";
@@ -71,11 +73,27 @@ keel::UniquePtr<IPlatformWindow> CreateX11PlatformWindow() {
 #endif
 }
 
+keel::UniquePtr<IPlatformWindow> CreateWin32PlatformWindow() {
+#if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
+    return keel::make_unique<Win32PlatformWindow>();
+#else
+    return nullptr;
+#endif
+}
+
 keel::UniquePtr<IPlatformWindow> CreateNativePlatformWindow(NativePlatform platform) {
+    if (platform == NativePlatform::Win32) {
+        return CreateWin32PlatformWindow();
+    }
     if (platform == NativePlatform::X11) {
         return CreateX11PlatformWindow();
     }
     if (platform == NativePlatform::Auto) {
+#if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
+        if (Win32PlatformWindow::IsRuntimeAvailable()) {
+            return keel::make_unique<Win32PlatformWindow>();
+        }
+#endif
 #if defined(GUIKIT_NATIVE_HAS_X11) && GUIKIT_NATIVE_HAS_X11
         if (X11PlatformWindow::IsRuntimeAvailable()) {
             return keel::make_unique<X11PlatformWindow>();
@@ -105,7 +123,11 @@ keel::UniquePtr<IWindowBackend> CreateNativeWindowBackend(
     }
 
     const bool useEs3 = (renderer == NativeRenderer::Auto || renderer == NativeRenderer::OpenGLES3);
+#if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
+    const GraphicsApi gfxApi = useEs3 ? GraphicsApi::OpenGL3 : GraphicsApi::None;
+#else
     const GraphicsApi gfxApi = useEs3 ? GraphicsApi::OpenGLES3 : GraphicsApi::None;
+#endif
 
     PlatformCanvasFactory factory = [useEs3](IPlatformWindow& w) -> keel::UniquePtr<ICanvas> {
         if (useEs3) {

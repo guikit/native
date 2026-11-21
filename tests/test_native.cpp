@@ -59,25 +59,33 @@ int main() {
         }
     }
 
-    // 3. Live X11 + EGL + OpenGL ES 3.0 smoke test when an X11 display & EGL driver are available
-    if (X11PlatformWindow::IsRuntimeAvailable()) {
-        keel::println("  -> Live X11 + EGL runtime detected; verifying GlEs3Canvas shader compile & full UI frame...");
-        auto x11Win = CreateX11PlatformWindow();
-        CHECK(x11Win != nullptr);
+    // 3. Live native platform window + OpenGL ES3 / GL3.3 Core smoke test when a display runtime is available
+    const bool hasLiveRuntime = X11PlatformWindow::IsRuntimeAvailable() || Win32PlatformWindow::IsRuntimeAvailable();
+    if (hasLiveRuntime) {
+        auto nativeWin = CreateNativePlatformWindow(NativePlatform::Auto);
+        CHECK(nativeWin != nullptr);
+        if (nativeWin) {
+            keel::println("  -> Live native runtime detected ({}); verifying GlEs3Canvas shader compile & full UI frame...",
+                          nativeWin->GetPlatformName());
+        }
 
         Context ui;
         PlatformWindowDesc desc{};
-        desc.title = "GuiKit Native ES3 Test";
+        desc.title = "GuiKit Native GPU Test";
         desc.width = 400;
         desc.height = 300;
         desc.vsync = false;
+#if defined(_WIN32)
+        desc.graphicsApi = GraphicsApi::OpenGL3;
+#else
         desc.graphicsApi = GraphicsApi::OpenGLES3;
+#endif
 
-        if (x11Win && x11Win->Create(desc, ui, {})) {
-            CHECK(x11Win->MakeContextCurrent());
-            CHECK(x11Win->GetGlProcAddressFn() != nullptr);
+        if (nativeWin && nativeWin->Create(desc, ui, {})) {
+            CHECK(nativeWin->MakeContextCurrent());
+            CHECK(nativeWin->GetGlProcAddressFn() != nullptr);
 
-            GlEs3Canvas glCanvas(x11Win->GetGlProcAddressFn(), true);
+            GlEs3Canvas glCanvas(nativeWin->GetGlProcAddressFn(), true);
             CHECK(glCanvas.IsInitialized());
             CHECK(!glCanvas.GetGlVersionString().empty());
             keel::println("     GL Version:  {}", glCanvas.GetGlVersionString());
@@ -189,12 +197,12 @@ void main() {
                 CHECK(glCanvas.DrawImage("assets/guikit-icon-inter850-1024.png", Rect(20.0f, 100.0f, 48.0f, 48.0f), 8.0f, 255));
                 CHECK(glCanvas.DrawPixels({samplePixels, 16u, 16u}, Rect(100.0f, 100.0f, 48.0f, 48.0f), 6.0f, 255));
                 glCanvas.End();
-                x11Win->SwapBuffers();
+                nativeWin->SwapBuffers();
             }
             glCanvas.TrimCaches();
-            x11Win->Destroy();
+            nativeWin->Destroy();
         } else {
-            keel::println("  -> X11 display unreachable in current environment; skipping live GL test.");
+            keel::println("  -> Native display unreachable in current environment; skipping live GL test.");
         }
     }
 
