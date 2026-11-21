@@ -572,6 +572,7 @@ struct X11PlatformWindow::Impl {
             case MapNotify:
                 minimized = false;
                 ui.InvalidateAll();
+                ui.RequestRepaint(2);
                 break;
 
             case UnmapNotify:
@@ -821,7 +822,9 @@ bool X11PlatformWindow::PumpEvents(Context& ui, bool reactiveMode, keel::i32 sle
         }
     }
 
-    if (!hadEvents && reactiveMode && !ui.NeedsRepaint() && sleepTimeoutMs != 0) {
+    const bool shouldSleep = !hadEvents && sleepTimeoutMs != 0 &&
+        (m_impl->minimized || (reactiveMode && !ui.NeedsRepaint()));
+    if (shouldSleep) {
         const keel::i32 x11Fd = m_impl->x11.ConnectionNumber(m_impl->display);
         struct pollfd fds[2]{};
         fds[0].fd = x11Fd;

@@ -502,6 +502,7 @@ struct GlEs3Canvas::Impl {
         GLuint texId{0};
         keel::u32 width{0};
         keel::u32 height{0};
+        keel::u64 lastUsedFrame{0};
         bool valid{false};
         bool probedOnly{false};
     };
@@ -524,6 +525,7 @@ struct GlEs3Canvas::Impl {
         keel::u32 texH{0};
         keel::u64 fullGen{0};
         keel::u64 sliceGen{0};
+        keel::u64 lastUsedFrame{0};
         GLuint lutTex{0};
         keel::u8 lutId{255};
         bool lutUploaded{false};
@@ -533,6 +535,7 @@ struct GlEs3Canvas::Impl {
     GLuint passQuadVbo{0};
     bool gpuShadersEnabled{true};
     keel::u32 activeGpuPassesThisFrame{0};
+    keel::u64 frameCounter{0};
     keel::HashMap<keel::String, CompiledPassProgram> gpuPrograms;
     keel::HashMap<keel::u64, WidgetGpuTextures> gpuWidgetTex;
     keel::Array<keel::u32> gpuRgbaScratch;
@@ -1111,6 +1114,7 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, float scale) {
     m_impl->quadBatch.clear();
     m_impl->triBatch.clear();
     m_impl->activeGpuPassesThisFrame = 0u;
+    ++m_impl->frameCounter;
 
     if (!m_impl->initialized) return;
 
@@ -1636,10 +1640,11 @@ bool GlEs3Canvas::DrawImage(
         return false;
     }
 
-    const auto* img = m_impl->ResolveImage(source, /*requireTexture=*/true);
+    auto* img = m_impl->ResolveImage(source, /*requireTexture=*/true);
     if (!img || !img->valid || img->texId == 0u) {
         return false;
     }
+    img->lastUsedFrame = m_impl->frameCounter;
 
     const float eff = m_impl->EffScale();
     const Rect pr = m_impl->PxRect(destRect);
@@ -1800,6 +1805,7 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
     if (!wt) {
         return false;
     }
+    wt->lastUsedFrame = m_impl->frameCounter;
 
     const float invNormScale = 1.0f / keel::max(1e-6f, pass.dataNormScale);
     const bool needFullUpload = (wt->dataTex == 0u || wt->texW != texW || wt->texH != texH ||
@@ -1970,9 +1976,52 @@ void GlEs3Canvas::TrimCaches() noexcept {
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     m_impl->ft.TrimCaches();
 #endif
-    m_impl->gpuRgbaScratch.clear();
-    if (m_impl->imageCache.size() > 64u) {
-        m_impl->ReleaseImageCache();
+    m_impl->gpuRgbaScratch = {};
+    if (m_impl->quadBatch.empty() && m_impl->quadBatch.capacity() > 4096u) {
+        m_impl->quadBatch = {};
+    }
+    if (m_impl->triBatch.empty() && m_impl->triBatch.capacity() > 8192u) {
+        m_impl->triBatch = {};
+    }
+
+    // Evict GPU shader textures for widgets that are no longer active on screen
+    if (m_impl->initialized && !m_impl->gpuWidgetTex.empty()) {
+        keel::SmallArray<keel::u64, 16> staleWidgets;
+        for (auto [wid, wt] : m_impl->gpuWidgetTex) {
+            if (wt.lastUsedFrame + 2u < m_impl->frameCounter) {
+                if (wt.dataTex != 0u && m_impl->gl.DeleteTextures) {
+                    m_impl->gl.DeleteTextures(1, &wt.dataTex);
+                    wt.dataTex = 0u;
+                }
+                if (wt.lutTex != 0u && m_impl->gl.DeleteTextures) {
+                    m_impl->gl.DeleteTextures(1, &wt.lutTex);
+                    wt.lutTex = 0u;
+                }
+                if (staleWidgets.size() < staleWidgets.capacity()) {
+                    staleWidgets.push_back(wid);
+                }
+            }
+        }
+        for (keel::u64 wid : staleWidgets) {
+            m_impl->gpuWidgetTex.remove(wid);
+        }
+    }
+
+    // Evict stale image textures when image cache grows beyond lightweight working set
+    if (m_impl->initialized && m_impl->imageCache.size() > 16u) {
+        keel::Array<keel::String> staleImages;
+        for (auto [key, img] : m_impl->imageCache) {
+            if (img.lastUsedFrame + 8u < m_impl->frameCounter) {
+                if (img.texId != 0u && m_impl->gl.DeleteTextures) {
+                    m_impl->gl.DeleteTextures(1, &img.texId);
+                    img.texId = 0u;
+                }
+                staleImages.push_back(key.clone());
+            }
+        }
+        for (const auto& key : staleImages) {
+            m_impl->imageCache.remove(key);
+        }
     }
 }
 
