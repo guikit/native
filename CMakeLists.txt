@@ -34,7 +34,6 @@ endif()
 
 add_library(guikit_native STATIC
     src/guikit/native/gl_es3_canvas.cpp
-    src/guikit/native/png_decoder.cpp
     src/guikit/native/win32_platform_window.cpp
     src/guikit/native/x11_platform_window.cpp
     src/guikit/native/native_backend.cpp

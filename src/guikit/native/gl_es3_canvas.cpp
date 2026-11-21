@@ -1,7 +1,6 @@
 #include "guikit/native/gl_es3_canvas.hpp"
 
 #include "gl_es3_loader.hpp"
-#include "png_decoder.hpp"
 #include "guikit/backend/text_compositor.hpp"
 #include "guikit/backend/vector_backend.hpp"
 #include "guikit/core/assets.hpp"
@@ -841,7 +840,7 @@ struct GlEs3Canvas::Impl {
         if (!requireTexture) {
             keel::u32 w = 0u;
             keel::u32 h = 0u;
-            if (InspectPngDimensions(bytes, w, h)) {
+            if (InspectImageFromMemory(bytes, w, h)) {
                 CachedImage probed{};
                 probed.width = w;
                 probed.height = h;
@@ -855,10 +854,7 @@ struct GlEs3Canvas::Impl {
         keel::u32 w = 0u;
         keel::u32 h = 0u;
         keel::Array<keel::u32> rgba;
-        bool decoded = DecodeImageFromMemory(bytes, w, h, rgba);
-        if (!decoded) {
-            decoded = DecodePngFromMemory(bytes, w, h, rgba);
-        }
+        const bool decoded = DecodeImageFromMemory(bytes, w, h, rgba);
         if (!decoded || w == 0u || h == 0u || rgba.size() < keel::as<keel::usize>(w) * h) {
             CachedImage invalid{};
             invalid.valid = false;

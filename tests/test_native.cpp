@@ -39,12 +39,17 @@ int main() {
         uninitCanvas.End();
     }
 
-    // 2.5. Pure 0BSD PNG decoder registered via RegisterNativeWindowBackend
+    // 2.5. Built-in keel::imagefile decoder in guikit::core (InspectImageFromMemory + DecodeImageFromMemory)
     {
         RegisterNativeWindowBackend();
         const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png");
         CHECK(iconAsset.has_value() && !iconAsset->Empty());
         if (iconAsset && !iconAsset->Empty()) {
+            keel::u32 pw = 0u;
+            keel::u32 ph = 0u;
+            CHECK(InspectImageFromMemory(iconAsset->Bytes(), pw, ph));
+            CHECK(pw == 1024u && ph == 1024u);
+
             keel::u32 w = 0u;
             keel::u32 h = 0u;
             keel::Array<keel::u32> rgba;

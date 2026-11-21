@@ -1,8 +1,5 @@
 #include "guikit/native.hpp"
 
-#include "guikit/backend/vector_backend.hpp"
-#include "png_decoder.hpp"
-
 namespace guikit::native {
 
 namespace {
@@ -115,8 +112,6 @@ keel::UniquePtr<IWindowBackend> CreateNativeWindowBackend(
     NativePlatform platform,
     NativeRenderer renderer
 ) {
-    RegisterDefaultImageDecoder(&detail::DecodePngFromMemory);
-
     auto win = CreateNativePlatformWindow(platform);
     if (!win) {
         return nullptr;
@@ -142,7 +137,6 @@ keel::UniquePtr<IWindowBackend> CreateNativeWindowBackend(
 }
 
 void RegisterNativeWindowBackend() noexcept {
-    RegisterDefaultImageDecoder(&detail::DecodePngFromMemory);
     RegisterDefaultWindowBackendFactory(&DefaultNativeBackendFactory);
 }
 
