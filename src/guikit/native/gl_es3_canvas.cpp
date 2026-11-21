@@ -26,24 +26,24 @@ namespace {
 using namespace detail;
 
 struct QuadInstance {
-    float rx, ry, rw, rh;        // location 0: physical pixel rect (x, y, w, h)
-    float u0, v0, u1, v1;        // location 1: UVs (or p1.xy, p2.xy for Line mode)
-    float fr, fg, fb, fa;        // location 2: fill / tint RGBA [0..1]
-    float sr, sg, sb, sa;        // location 3: stroke RGBA [0..1]
-    float radius, strokeW, mode, extra; // location 4: params
+    keel::f32 rx, ry, rw, rh;        // location 0: physical pixel rect (x, y, w, h)
+    keel::f32 u0, v0, u1, v1;        // location 1: UVs (or p1.xy, p2.xy for Line mode)
+    keel::f32 fr, fg, fb, fa;        // location 2: fill / tint RGBA [0..1]
+    keel::f32 sr, sg, sb, sa;        // location 3: stroke RGBA [0..1]
+    keel::f32 radius, strokeW, mode, extra; // location 4: params
 };
 
 struct TriVertex {
-    float x, y;
-    float r, g, b, a;
+    keel::f32 x, y;
+    keel::f32 r, g, b, a;
 };
 
-static constexpr float kModeRoundRect   = 0.0f;
-static constexpr float kModeLine        = 1.0f;
-static constexpr float kModeTexture     = 2.0f;
-static constexpr float kModeGlyphR8     = 3.0f;
-static constexpr float kModeGlyphLcdRgb = 4.0f;
-static constexpr float kModeGlyphLcdBgr = 5.0f;
+static constexpr keel::f32 kModeRoundRect   = 0.0f;
+static constexpr keel::f32 kModeLine        = 1.0f;
+static constexpr keel::f32 kModeTexture     = 2.0f;
+static constexpr keel::f32 kModeGlyphR8     = 3.0f;
+static constexpr keel::f32 kModeGlyphLcdRgb = 4.0f;
+static constexpr keel::f32 kModeGlyphLcdBgr = 5.0f;
 
 static constexpr keel::u32 kAtlasSize    = 2048u;
 static constexpr keel::u32 kLcdAtlasSize = 1024u;
@@ -276,9 +276,9 @@ void main() {
 }
 )GLSL";
 
-[[nodiscard]] inline keel::u32 PackRG16Norm(float norm) noexcept {
-    const float clamped = keel::clamp(norm, 0.0f, 1.0f);
-    const keel::u32 q = static_cast<keel::u32>(keel::round_i32(clamped * 65535.0f));
+[[nodiscard]] inline keel::u32 PackRG16Norm(keel::f32 norm) noexcept {
+    const keel::f32 clamped = keel::clamp(norm, 0.0f, 1.0f);
+    const keel::u32 q = keel::as<keel::u32>(keel::round_i32(clamped * 65535.0f));
     const keel::u32 hi = (q >> 8) & 0xFFu;
     const keel::u32 lo = q & 0xFFu;
     return hi | (lo << 8) | 0xFF000000u;
@@ -317,7 +317,7 @@ void main() {
           "#define gl_FragColor guikit_FragColor\n"
           "out vec4 guikit_FragColor;\n";
     const GLchar* fsSources[2] = {fsPreamble, glslEs2Frag.data()};
-    const GLint fsLengths[2] = {-1, static_cast<GLint>(glslEs2Frag.size())};
+    const GLint fsLengths[2] = {-1, keel::as<GLint>(glslEs2Frag.size())};
     GLuint fs = gl.CreateShader(kGlFragmentShader);
     if (fs == 0u) {
         gl.DeleteShader(vs);
@@ -330,8 +330,8 @@ void main() {
     if (status == 0) {
         char logBuf[512]{};
         GLsizei logLen = 0;
-        gl.GetShaderInfoLog(fs, static_cast<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
-        keel::eprintln("[GlEs3Canvas] GPU pass frag compile failed: {}", keel::StringRef(logBuf, static_cast<keel::usize>(keel::max(0, logLen))));
+        gl.GetShaderInfoLog(fs, keel::as<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
+        keel::eprintln("[GlEs3Canvas] GPU pass frag compile failed: {}", keel::StringRef(logBuf, keel::as<keel::usize>(keel::max(0, logLen))));
         gl.DeleteShader(vs);
         gl.DeleteShader(fs);
         return 0u;
@@ -349,8 +349,8 @@ void main() {
     if (status == 0) {
         char logBuf[512]{};
         GLsizei logLen = 0;
-        gl.GetProgramInfoLog(prog, static_cast<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
-        keel::eprintln("[GlEs3Canvas] GPU pass link failed: {}", keel::StringRef(logBuf, static_cast<keel::usize>(keel::max(0, logLen))));
+        gl.GetProgramInfoLog(prog, keel::as<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
+        keel::eprintln("[GlEs3Canvas] GPU pass link failed: {}", keel::StringRef(logBuf, keel::as<keel::usize>(keel::max(0, logLen))));
         gl.DeleteProgram(prog);
         return 0u;
     }
@@ -378,8 +378,8 @@ void main() {
     if (status == 0) {
         char logBuf[512]{};
         GLsizei logLen = 0;
-        gl.GetShaderInfoLog(shader, static_cast<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
-        keel::eprintln("[GlEs3Canvas] Shader compile failed: {}", keel::StringRef(logBuf, static_cast<keel::usize>(keel::max(0, logLen))));
+        gl.GetShaderInfoLog(shader, keel::as<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
+        keel::eprintln("[GlEs3Canvas] Shader compile failed: {}", keel::StringRef(logBuf, keel::as<keel::usize>(keel::max(0, logLen))));
         gl.DeleteShader(shader);
         return 0u;
     }
@@ -412,8 +412,8 @@ void main() {
     if (status == 0) {
         char logBuf[512]{};
         GLsizei logLen = 0;
-        gl.GetProgramInfoLog(prog, static_cast<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
-        keel::eprintln("[GlEs3Canvas] Program link failed: {}", keel::StringRef(logBuf, static_cast<keel::usize>(keel::max(0, logLen))));
+        gl.GetProgramInfoLog(prog, keel::as<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
+        keel::eprintln("[GlEs3Canvas] Program link failed: {}", keel::StringRef(logBuf, keel::as<keel::usize>(keel::max(0, logLen))));
         gl.DeleteProgram(prog);
         return 0u;
     }
@@ -423,21 +423,21 @@ void main() {
 [[nodiscard]] keel::usize CountUtf8Codepoints(keel::StringRef text) noexcept {
     keel::usize count = 0;
     for (keel::usize i = 0; i < text.size(); ++i) {
-        if ((static_cast<keel::u8>(text[i]) & 0xC0u) != 0x80u) {
+        if ((keel::as<keel::u8>(text[i]) & 0xC0u) != 0x80u) {
             ++count;
         }
     }
     return count;
 }
 
-[[nodiscard]] float Cross2D(Vec2 a, Vec2 b, Vec2 c) noexcept {
+[[nodiscard]] keel::f32 Cross2D(Vec2 a, Vec2 b, Vec2 c) noexcept {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
 [[nodiscard]] bool PointInTri(Vec2 p, Vec2 a, Vec2 b, Vec2 c) noexcept {
-    const float c1 = Cross2D(a, b, p);
-    const float c2 = Cross2D(b, c, p);
-    const float c3 = Cross2D(c, a, p);
+    const keel::f32 c1 = Cross2D(a, b, p);
+    const keel::f32 c2 = Cross2D(b, c, p);
+    const keel::f32 c3 = Cross2D(c, a, p);
     const bool hasNeg = (c1 < 0.0f) || (c2 < 0.0f) || (c3 < 0.0f);
     const bool hasPos = (c1 > 0.0f) || (c2 > 0.0f) || (c3 > 0.0f);
     return !(hasNeg && hasPos);
@@ -449,27 +449,27 @@ void FlattenCubicBezier(
     Vec2 p2,
     Vec2 p3,
     keel::Array<Vec2>& outPts,
-    float flatnessPx = 0.6f
+    keel::f32 flatnessPx = 0.6f
 ) {
-    const float dx = p3.x - p0.x;
-    const float dy = p3.y - p0.y;
-    const float d1 = keel::abs((p1.x - p3.x) * dy - (p1.y - p3.y) * dx);
-    const float d2 = keel::abs((p2.x - p3.x) * dy - (p2.y - p3.y) * dx);
-    const float lenSq = dx * dx + dy * dy;
-    const float err = (d1 + d2);
-    const float stepsF = keel::clamp(
+    const keel::f32 dx = p3.x - p0.x;
+    const keel::f32 dy = p3.y - p0.y;
+    const keel::f32 d1 = keel::abs((p1.x - p3.x) * dy - (p1.y - p3.y) * dx);
+    const keel::f32 d2 = keel::abs((p2.x - p3.x) * dy - (p2.y - p3.y) * dx);
+    const keel::f32 lenSq = dx * dx + dy * dy;
+    const keel::f32 err = (d1 + d2);
+    const keel::f32 stepsF = keel::clamp(
         keel::ceil(keel::sqrt(keel::max(err / keel::max(flatnessPx * keel::sqrt(keel::max(lenSq, 1.0f)), 0.5f), 1.0f)) * 2.0f),
         2.0f,
         24.0f
     );
-    const keel::i32 steps = static_cast<keel::i32>(stepsF);
+    const keel::i32 steps = keel::as<keel::i32>(stepsF);
     for (keel::i32 i = 1; i <= steps; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(steps);
-        const float u = 1.0f - t;
-        const float b0 = u * u * u;
-        const float b1 = 3.0f * u * u * t;
-        const float b2 = 3.0f * u * t * t;
-        const float b3 = t * t * t;
+        const keel::f32 t = keel::as<keel::f32>(i) / keel::as<keel::f32>(steps);
+        const keel::f32 u = 1.0f - t;
+        const keel::f32 b0 = u * u * u;
+        const keel::f32 b1 = 3.0f * u * u * t;
+        const keel::f32 b2 = 3.0f * u * t * t;
+        const keel::f32 b3 = t * t * t;
         outPts.push_back(Vec2{
             b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x,
             b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y
@@ -481,7 +481,7 @@ void FlattenCubicBezier(
 
 struct GlEs3Canvas::Impl {
     struct TransformState {
-        float scale{1.0f};
+        keel::f32 scale{1.0f};
         Vec2 offset{0.0f, 0.0f};
     };
 
@@ -500,22 +500,22 @@ struct GlEs3Canvas::Impl {
 
     struct AtlasKeyHash {
         keel::u64 operator()(const AtlasKey& k) const noexcept {
-            keel::u64 h = static_cast<keel::u64>(k.codepoint);
-            h ^= (static_cast<keel::u64>(k.sizeQ4) |
-                  (static_cast<keel::u64>(k.style) << 16) |
-                  (static_cast<keel::u64>(k.flags) << 24)) * 0x9e3779b97f4a7c15ULL;
+            keel::u64 h = keel::as<keel::u64>(k.codepoint);
+            h ^= (keel::as<keel::u64>(k.sizeQ4) |
+                  (keel::as<keel::u64>(k.style) << 16) |
+                  (keel::as<keel::u64>(k.flags) << 24)) * 0x9e3779b97f4a7c15ULL;
             h ^= h >> 33;
             return h * 0xff51afd7ed558ccdULL;
         }
     };
 
     struct AtlasGlyph {
-        float u0{0.0f}, v0{0.0f}, u1{0.0f}, v1{0.0f};
+        keel::f32 u0{0.0f}, v0{0.0f}, u1{0.0f}, v1{0.0f};
         keel::u16 width{0};
         keel::u16 height{0};
         keel::i16 bearingX{0};
         keel::i16 bearingY{0};
-        float advancePx{0.0f};
+        keel::f32 advancePx{0.0f};
         bool empty{true};
     };
 #endif
@@ -597,8 +597,8 @@ struct GlEs3Canvas::Impl {
 
     keel::u32 fbWidth{0};
     keel::u32 fbHeight{0};
-    float scale{1.0f};
-    float xfScale{1.0f};
+    keel::f32 scale{1.0f};
+    keel::f32 xfScale{1.0f};
     Vec2 xfOffset{0.0f, 0.0f};
     keel::SmallArray<TransformState, 8> transformStack;
     keel::SmallArray<Rect, 16> clipStack;
@@ -618,7 +618,7 @@ struct GlEs3Canvas::Impl {
     keel::Array<keel::u8> lcdUploadScratch;
 #endif
 
-    [[nodiscard]] float EffScale() const noexcept { return scale * xfScale; }
+    [[nodiscard]] keel::f32 EffScale() const noexcept { return scale * xfScale; }
 
     [[nodiscard]] Vec2 PxPt(Vec2 p) const noexcept {
         return Vec2{
@@ -628,7 +628,7 @@ struct GlEs3Canvas::Impl {
     }
 
     [[nodiscard]] Rect PxRect(Rect r) const noexcept {
-        const float eff = EffScale();
+        const keel::f32 eff = EffScale();
         return Rect(
             (r.x * xfScale + xfOffset.x) * scale,
             (r.y * xfScale + xfOffset.y) * scale,
@@ -674,10 +674,10 @@ struct GlEs3Canvas::Impl {
         gl.BindVertexArray(quadVao);
         gl.BindBuffer(kGlArrayBuffer, quadInstanceVbo);
 
-        const GLsizei stride = static_cast<GLsizei>(sizeof(QuadInstance));
+        const GLsizei stride = keel::as<GLsizei>(sizeof(QuadInstance));
         for (GLuint loc = 0; loc < 5; ++loc) {
             gl.EnableVertexAttribArray(loc);
-            const auto offset = static_cast<keel::usize>(loc) * 4u * sizeof(float);
+            const auto offset = keel::as<keel::usize>(loc) * 4u * sizeof(keel::f32);
             gl.VertexAttribPointer(loc, 4, kGlFloat, kGlFalse, stride, reinterpret_cast<const void*>(offset));
             gl.VertexAttribDivisor(loc, 1);
         }
@@ -688,12 +688,12 @@ struct GlEs3Canvas::Impl {
         gl.BindVertexArray(triVao);
         gl.BindBuffer(kGlArrayBuffer, triVbo);
         gl.EnableVertexAttribArray(0);
-        gl.VertexAttribPointer(0, 2, kGlFloat, kGlFalse, static_cast<GLsizei>(sizeof(TriVertex)), reinterpret_cast<const void*>(0));
+        gl.VertexAttribPointer(0, 2, kGlFloat, kGlFalse, keel::as<GLsizei>(sizeof(TriVertex)), reinterpret_cast<const void*>(0));
         gl.EnableVertexAttribArray(1);
-        gl.VertexAttribPointer(1, 4, kGlFloat, kGlFalse, static_cast<GLsizei>(sizeof(TriVertex)), reinterpret_cast<const void*>(2u * sizeof(float)));
+        gl.VertexAttribPointer(1, 4, kGlFloat, kGlFalse, keel::as<GLsizei>(sizeof(TriVertex)), reinterpret_cast<const void*>(2u * sizeof(keel::f32)));
 
         // Setup GPU Shader Pass unit-quad VAO + VBO
-        static constexpr float kUnitQuadUvs[12] = {
+        static constexpr keel::f32 kUnitQuadUvs[12] = {
             0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f,
             0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f
         };
@@ -701,36 +701,36 @@ struct GlEs3Canvas::Impl {
         gl.GenBuffers(1, &passQuadVbo);
         gl.BindVertexArray(passQuadVao);
         gl.BindBuffer(kGlArrayBuffer, passQuadVbo);
-        gl.BufferData(kGlArrayBuffer, static_cast<GLsizeiptr>(sizeof(kUnitQuadUvs)), kUnitQuadUvs, kGlStaticDraw);
+        gl.BufferData(kGlArrayBuffer, keel::as<GLsizeiptr>(sizeof(kUnitQuadUvs)), kUnitQuadUvs, kGlStaticDraw);
         gl.EnableVertexAttribArray(0);
-        gl.VertexAttribPointer(0, 2, kGlFloat, kGlFalse, static_cast<GLsizei>(2u * sizeof(float)), reinterpret_cast<const void*>(0));
+        gl.VertexAttribPointer(0, 2, kGlFloat, kGlFalse, keel::as<GLsizei>(2u * sizeof(keel::f32)), reinterpret_cast<const void*>(0));
         gl.BindVertexArray(0);
 
         // 1x1 white fallback texture
         gl.GenTextures(1, &whiteTex);
         gl.BindTexture(kGlTexture2D, whiteTex);
-        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlNearest));
-        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlNearest));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
         const keel::u32 whitePx = 0xFFFFFFFFu;
-        gl.TexImage2D(kGlTexture2D, 0, static_cast<GLint>(kGlRgba8), 1, 1, 0, kGlRgba, kGlUnsignedByte, &whitePx);
+        gl.TexImage2D(kGlTexture2D, 0, keel::as<GLint>(kGlRgba8), 1, 1, 0, kGlRgba, kGlUnsignedByte, &whitePx);
 
         // 1024x1024 R8 glyph atlas texture
         gl.GenTextures(1, &atlasTex);
         gl.BindTexture(kGlTexture2D, atlasTex);
-        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlLinear));
-        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlLinear));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
         gl.PixelStorei(kGlUnpackAlignment, 1);
-        keel::Array<keel::u8> zeroAtlas(static_cast<keel::usize>(kAtlasSize) * kAtlasSize, 0u);
+        keel::Array<keel::u8> zeroAtlas(keel::as<keel::usize>(kAtlasSize) * kAtlasSize, 0u);
         gl.TexImage2D(
             kGlTexture2D,
             0,
-            static_cast<GLint>(kGlR8),
-            static_cast<GLsizei>(kAtlasSize),
-            static_cast<GLsizei>(kAtlasSize),
+            keel::as<GLint>(kGlR8),
+            keel::as<GLsizei>(kAtlasSize),
+            keel::as<GLsizei>(kAtlasSize),
             0,
             kGlRed,
             kGlUnsignedByte,
@@ -739,10 +739,10 @@ struct GlEs3Canvas::Impl {
 
         gl.GenTextures(1, &transientPixelsTex);
         gl.BindTexture(kGlTexture2D, transientPixelsTex);
-        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlLinear));
-        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlLinear));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
 
         gl.BindTexture(kGlTexture2D, 0);
         activeTex = whiteTex;
@@ -859,7 +859,7 @@ struct GlEs3Canvas::Impl {
         if (!decoded) {
             decoded = DecodePngFromMemory(bytes, w, h, rgba);
         }
-        if (!decoded || w == 0u || h == 0u || rgba.size() < static_cast<keel::usize>(w) * h) {
+        if (!decoded || w == 0u || h == 0u || rgba.size() < keel::as<keel::usize>(w) * h) {
             CachedImage invalid{};
             invalid.valid = false;
             imageCache.put(keel::String::from(source), invalid);
@@ -876,17 +876,17 @@ struct GlEs3Canvas::Impl {
             GLuint tex = 0u;
             gl.GenTextures(1, &tex);
             gl.BindTexture(kGlTexture2D, tex);
-            gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlLinear));
-            gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlLinear));
-            gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-            gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+            gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
             gl.PixelStorei(kGlUnpackAlignment, 4);
             gl.TexImage2D(
                 kGlTexture2D,
                 0,
-                static_cast<GLint>(kGlRgba8),
-                static_cast<GLsizei>(w),
-                static_cast<GLsizei>(h),
+                keel::as<GLint>(kGlRgba8),
+                keel::as<GLsizei>(w),
+                keel::as<GLsizei>(h),
                 0,
                 kGlRgba,
                 kGlUnsignedByte,
@@ -929,15 +929,15 @@ struct GlEs3Canvas::Impl {
         if (!initialized || quadBatch.empty()) return;
 
         if (activeLcdBlend) {
-            const float cr = static_cast<float>(activeLcdRgbKey & 0xFFu) / 255.0f;
-            const float cg = static_cast<float>((activeLcdRgbKey >> 8) & 0xFFu) / 255.0f;
-            const float cb = static_cast<float>((activeLcdRgbKey >> 16) & 0xFFu) / 255.0f;
+            const keel::f32 cr = keel::as<keel::f32>(activeLcdRgbKey & 0xFFu) / 255.0f;
+            const keel::f32 cg = keel::as<keel::f32>((activeLcdRgbKey >> 8) & 0xFFu) / 255.0f;
+            const keel::f32 cb = keel::as<keel::f32>((activeLcdRgbKey >> 16) & 0xFFu) / 255.0f;
             gl.BlendColor(cr, cg, cb, 1.0f);
             gl.BlendFuncSeparate(kGlConstantColor, kGlOneMinusSrcColor, kGlOne, kGlOneMinusSrcAlpha);
         }
 
         gl.UseProgram(quadProg);
-        gl.Uniform2f(quadUniformViewport, static_cast<float>(fbWidth), static_cast<float>(fbHeight));
+        gl.Uniform2f(quadUniformViewport, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
         gl.Uniform1i(quadUniformTex, 0);
         gl.ActiveTexture(kGlTexture0);
         gl.BindTexture(kGlTexture2D, activeTex ? activeTex : whiteTex);
@@ -947,10 +947,10 @@ struct GlEs3Canvas::Impl {
         const keel::usize byteSize = quadBatch.size() * sizeof(QuadInstance);
         if (byteSize > quadVboCapacity) {
             quadVboCapacity = keel::max(byteSize, quadVboCapacity * 2u + 4096u);
-            gl.BufferData(kGlArrayBuffer, static_cast<GLsizeiptr>(quadVboCapacity), nullptr, kGlStreamDraw);
+            gl.BufferData(kGlArrayBuffer, keel::as<GLsizeiptr>(quadVboCapacity), nullptr, kGlStreamDraw);
         }
-        gl.BufferSubData(kGlArrayBuffer, 0, static_cast<GLsizeiptr>(byteSize), quadBatch.data());
-        gl.DrawArraysInstanced(kGlTriangles, 0, 6, static_cast<GLsizei>(quadBatch.size()));
+        gl.BufferSubData(kGlArrayBuffer, 0, keel::as<GLsizeiptr>(byteSize), quadBatch.data());
+        gl.DrawArraysInstanced(kGlTriangles, 0, 6, keel::as<GLsizei>(quadBatch.size()));
         quadBatch.clear();
 
         if (activeLcdBlend) {
@@ -962,17 +962,17 @@ struct GlEs3Canvas::Impl {
         if (!initialized || triBatch.empty()) return;
 
         gl.UseProgram(triProg);
-        gl.Uniform2f(triUniformViewport, static_cast<float>(fbWidth), static_cast<float>(fbHeight));
+        gl.Uniform2f(triUniformViewport, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
 
         gl.BindVertexArray(triVao);
         gl.BindBuffer(kGlArrayBuffer, triVbo);
         const keel::usize byteSize = triBatch.size() * sizeof(TriVertex);
         if (byteSize > triVboCapacity) {
             triVboCapacity = keel::max(byteSize, triVboCapacity * 2u + 4096u);
-            gl.BufferData(kGlArrayBuffer, static_cast<GLsizeiptr>(triVboCapacity), nullptr, kGlStreamDraw);
+            gl.BufferData(kGlArrayBuffer, keel::as<GLsizeiptr>(triVboCapacity), nullptr, kGlStreamDraw);
         }
-        gl.BufferSubData(kGlArrayBuffer, 0, static_cast<GLsizeiptr>(byteSize), triBatch.data());
-        gl.DrawArrays(kGlTriangles, 0, static_cast<GLsizei>(triBatch.size()));
+        gl.BufferSubData(kGlArrayBuffer, 0, keel::as<GLsizeiptr>(byteSize), triBatch.data());
+        gl.DrawArrays(kGlTriangles, 0, keel::as<GLsizei>(triBatch.size()));
         triBatch.clear();
     }
 
@@ -990,11 +990,11 @@ struct GlEs3Canvas::Impl {
         const Rect& cr = clipStack.back();
         const GLint x0 = keel::max(0, keel::floor_i32(cr.x));
         const GLint y0Top = keel::max(0, keel::floor_i32(cr.y));
-        const GLint x1 = keel::min(static_cast<GLint>(fbWidth), keel::ceil_i32(cr.Right()));
-        const GLint y1Top = keel::min(static_cast<GLint>(fbHeight), keel::ceil_i32(cr.Bottom()));
+        const GLint x1 = keel::min(keel::as<GLint>(fbWidth), keel::ceil_i32(cr.Right()));
+        const GLint y1Top = keel::min(keel::as<GLint>(fbHeight), keel::ceil_i32(cr.Bottom()));
         const GLsizei w = keel::max(0, x1 - x0);
         const GLsizei h = keel::max(0, y1Top - y0Top);
-        const GLint glY = static_cast<GLint>(fbHeight) - y1Top;
+        const GLint glY = keel::as<GLint>(fbHeight) - y1Top;
         gl.Enable(kGlScissorTest);
         gl.Scissor(x0, keel::max(0, glY), w, h);
     }
@@ -1027,10 +1027,10 @@ struct GlEs3Canvas::Impl {
         if (!quadBatch.empty()) {
             FlushQuads();
         }
-        const float r = col.r / 255.0f;
-        const float g = col.g / 255.0f;
-        const float bl = col.b / 255.0f;
-        const float al = col.a / 255.0f;
+        const keel::f32 r = col.r / 255.0f;
+        const keel::f32 g = col.g / 255.0f;
+        const keel::f32 bl = col.b / 255.0f;
+        const keel::f32 al = col.a / 255.0f;
         triBatch.push_back(TriVertex{a.x, a.y, r, g, bl, al});
         triBatch.push_back(TriVertex{b.x, b.y, r, g, bl, al});
         triBatch.push_back(TriVertex{c.x, c.y, r, g, bl, al});
@@ -1055,18 +1055,18 @@ struct GlEs3Canvas::Impl {
         gl.GenTextures(1, &atlasLcdTex);
         if (atlasLcdTex == 0u) return false;
         gl.BindTexture(kGlTexture2D, atlasLcdTex);
-        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlNearest));
-        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlNearest));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
         gl.PixelStorei(kGlUnpackAlignment, 4);
-        keel::Array<keel::u8> zeroLcd(static_cast<keel::usize>(kLcdAtlasSize) * kLcdAtlasSize * 4u, 0u);
+        keel::Array<keel::u8> zeroLcd(keel::as<keel::usize>(kLcdAtlasSize) * kLcdAtlasSize * 4u, 0u);
         gl.TexImage2D(
             kGlTexture2D,
             0,
-            static_cast<GLint>(kGlRgba8),
-            static_cast<GLsizei>(kLcdAtlasSize),
-            static_cast<GLsizei>(kLcdAtlasSize),
+            keel::as<GLint>(kGlRgba8),
+            keel::as<GLsizei>(kLcdAtlasSize),
+            keel::as<GLsizei>(kLcdAtlasSize),
             0,
             kGlRgba,
             kGlUnsignedByte,
@@ -1076,13 +1076,13 @@ struct GlEs3Canvas::Impl {
         return true;
     }
 
-    const AtlasGlyph* ResolveAtlasGlyph(keel::u32 cp, float scaledPx, FontStyle style, keel::u8 phase) {
-        const keel::u16 sizeQ4 = static_cast<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
-        const keel::u8 flags = static_cast<keel::u8>((static_cast<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
+    const AtlasGlyph* ResolveAtlasGlyph(keel::u32 cp, keel::f32 scaledPx, FontStyle style, keel::u8 phase) {
+        const keel::u16 sizeQ4 = keel::as<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
+        const keel::u8 flags = keel::as<keel::u8>((keel::as<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
         const AtlasKey key{
             .codepoint = cp,
             .sizeQ4 = sizeQ4,
-            .style = static_cast<keel::u8>(style),
+            .style = keel::as<keel::u8>(style),
             .flags = flags
         };
         if (const AtlasGlyph* found = atlasMap.get(key)) {
@@ -1122,27 +1122,27 @@ struct GlEs3Canvas::Impl {
                 const keel::u32 gx = shelfX;
                 const keel::u32 gy = shelfY;
                 shelfX += rg.width + 1u;
-                shelfH = keel::max(shelfH, static_cast<keel::u32>(rg.height));
+                shelfH = keel::max(shelfH, keel::as<keel::u32>(rg.height));
 
                 gl.BindTexture(kGlTexture2D, atlasTex);
                 gl.PixelStorei(kGlUnpackAlignment, 1);
                 gl.TexSubImage2D(
                     kGlTexture2D,
                     0,
-                    static_cast<GLint>(gx),
-                    static_cast<GLint>(gy),
-                    static_cast<GLsizei>(rg.width),
-                    static_cast<GLsizei>(rg.height),
+                    keel::as<GLint>(gx),
+                    keel::as<GLint>(gy),
+                    keel::as<GLsizei>(rg.width),
+                    keel::as<GLsizei>(rg.height),
                     kGlRed,
                     kGlUnsignedByte,
                     rg.bitmap
                 );
 
-                const float inv = 1.0f / static_cast<float>(kAtlasSize);
-                ag.u0 = static_cast<float>(gx) * inv;
-                ag.v0 = static_cast<float>(gy) * inv;
-                ag.u1 = static_cast<float>(gx + rg.width) * inv;
-                ag.v1 = static_cast<float>(gy + rg.height) * inv;
+                const keel::f32 inv = 1.0f / keel::as<keel::f32>(kAtlasSize);
+                ag.u0 = keel::as<keel::f32>(gx) * inv;
+                ag.v0 = keel::as<keel::f32>(gy) * inv;
+                ag.u1 = keel::as<keel::f32>(gx + rg.width) * inv;
+                ag.v1 = keel::as<keel::f32>(gy + rg.height) * inv;
             }
         }
 
@@ -1150,16 +1150,16 @@ struct GlEs3Canvas::Impl {
         return atlasMap.get(key);
     }
 
-    const AtlasGlyph* ResolveLcdAtlasGlyph(keel::u32 cp, float scaledPx, FontStyle style, keel::u8 phase) {
+    const AtlasGlyph* ResolveLcdAtlasGlyph(keel::u32 cp, keel::f32 scaledPx, FontStyle style, keel::u8 phase) {
         if (!EnsureLcdAtlas()) {
             return nullptr;
         }
-        const keel::u16 sizeQ4 = static_cast<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
-        const keel::u8 flags = static_cast<keel::u8>((static_cast<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
+        const keel::u16 sizeQ4 = keel::as<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
+        const keel::u8 flags = keel::as<keel::u8>((keel::as<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
         const AtlasKey key{
             .codepoint = cp,
             .sizeQ4 = sizeQ4,
-            .style = static_cast<keel::u8>(style),
+            .style = keel::as<keel::u8>(style),
             .flags = flags
         };
         if (const AtlasGlyph* found = atlasLcdMap.get(key)) {
@@ -1199,14 +1199,14 @@ struct GlEs3Canvas::Impl {
                 const keel::u32 gx = lcdShelfX;
                 const keel::u32 gy = lcdShelfY;
                 lcdShelfX += rg.width + 1u;
-                lcdShelfH = keel::max(lcdShelfH, static_cast<keel::u32>(rg.height));
+                lcdShelfH = keel::max(lcdShelfH, keel::as<keel::u32>(rg.height));
 
-                const keel::usize numPx = static_cast<keel::usize>(rg.width) * rg.height;
+                const keel::usize numPx = keel::as<keel::usize>(rg.width) * rg.height;
                 lcdUploadScratch.resize(numPx * 4u);
                 if (rg.isSubpixel) {
                     for (keel::u32 y = 0u; y < rg.height; ++y) {
-                        const keel::u8* srcRow = rg.bitmap + static_cast<keel::usize>(y) * rg.strideBytes;
-                        keel::u8* dstRow = lcdUploadScratch.data() + static_cast<keel::usize>(y) * rg.width * 4u;
+                        const keel::u8* srcRow = rg.bitmap + keel::as<keel::usize>(y) * rg.strideBytes;
+                        keel::u8* dstRow = lcdUploadScratch.data() + keel::as<keel::usize>(y) * rg.width * 4u;
                         for (keel::u32 x = 0u; x < rg.width; ++x) {
                             dstRow[x * 4u + 0u] = srcRow[x * 3u + 0u];
                             dstRow[x * 4u + 1u] = srcRow[x * 3u + 1u];
@@ -1216,8 +1216,8 @@ struct GlEs3Canvas::Impl {
                     }
                 } else {
                     for (keel::u32 y = 0u; y < rg.height; ++y) {
-                        const keel::u8* srcRow = rg.bitmap + static_cast<keel::usize>(y) * rg.strideBytes;
-                        keel::u8* dstRow = lcdUploadScratch.data() + static_cast<keel::usize>(y) * rg.width * 4u;
+                        const keel::u8* srcRow = rg.bitmap + keel::as<keel::usize>(y) * rg.strideBytes;
+                        keel::u8* dstRow = lcdUploadScratch.data() + keel::as<keel::usize>(y) * rg.width * 4u;
                         for (keel::u32 x = 0u; x < rg.width; ++x) {
                             const keel::u8 c = srcRow[x];
                             dstRow[x * 4u + 0u] = c;
@@ -1233,20 +1233,20 @@ struct GlEs3Canvas::Impl {
                 gl.TexSubImage2D(
                     kGlTexture2D,
                     0,
-                    static_cast<GLint>(gx),
-                    static_cast<GLint>(gy),
-                    static_cast<GLsizei>(rg.width),
-                    static_cast<GLsizei>(rg.height),
+                    keel::as<GLint>(gx),
+                    keel::as<GLint>(gy),
+                    keel::as<GLsizei>(rg.width),
+                    keel::as<GLsizei>(rg.height),
                     kGlRgba,
                     kGlUnsignedByte,
                     lcdUploadScratch.data()
                 );
 
-                const float inv = 1.0f / static_cast<float>(kLcdAtlasSize);
-                ag.u0 = static_cast<float>(gx) * inv;
-                ag.v0 = static_cast<float>(gy) * inv;
-                ag.u1 = static_cast<float>(gx + rg.width) * inv;
-                ag.v1 = static_cast<float>(gy + rg.height) * inv;
+                const keel::f32 inv = 1.0f / keel::as<keel::f32>(kLcdAtlasSize);
+                ag.u0 = keel::as<keel::f32>(gx) * inv;
+                ag.v0 = keel::as<keel::f32>(gy) * inv;
+                ag.u1 = keel::as<keel::f32>(gx + rg.width) * inv;
+                ag.v1 = keel::as<keel::f32>(gy + rg.height) * inv;
             }
         }
 
@@ -1317,7 +1317,7 @@ bool GlEs3Canvas::LoadFontMemory(
 #endif
 }
 
-void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, float scale) {
+void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->fbWidth = width;
     m_impl->fbHeight = height;
     m_impl->scale = (scale > 0.0f) ? scale : 1.0f;
@@ -1335,7 +1335,7 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, float scale) {
     if (!m_impl->initialized) return;
 
     auto& gl = m_impl->gl;
-    gl.Viewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    gl.Viewport(0, 0, keel::as<GLsizei>(width), keel::as<GLsizei>(height));
     gl.Disable(kGlDepthTest);
     gl.Disable(kGlCullFace);
     gl.Disable(kGlScissorTest);
@@ -1350,11 +1350,11 @@ void GlEs3Canvas::End() {
     m_impl->gl.Disable(kGlScissorTest);
 }
 
-float GlEs3Canvas::GetScale() const noexcept {
+keel::f32 GlEs3Canvas::GetScale() const noexcept {
     return m_impl->EffScale();
 }
 
-void GlEs3Canvas::SetScale(float scale) {
+void GlEs3Canvas::SetScale(keel::f32 scale) {
     m_impl->scale = (scale > 0.0f) ? scale : 1.0f;
 }
 
@@ -1393,11 +1393,11 @@ void GlEs3Canvas::Clear(Color color, keel::Optional<Rect> rect) {
         const Rect pr = m_impl->PxRect(*rect);
         const GLint x0 = keel::max(0, keel::floor_i32(pr.x));
         const GLint y0Top = keel::max(0, keel::floor_i32(pr.y));
-        const GLint x1 = keel::min(static_cast<GLint>(m_impl->fbWidth), keel::ceil_i32(pr.Right()));
-        const GLint y1Top = keel::min(static_cast<GLint>(m_impl->fbHeight), keel::ceil_i32(pr.Bottom()));
+        const GLint x1 = keel::min(keel::as<GLint>(m_impl->fbWidth), keel::ceil_i32(pr.Right()));
+        const GLint y1Top = keel::min(keel::as<GLint>(m_impl->fbHeight), keel::ceil_i32(pr.Bottom()));
         const GLsizei w = keel::max(0, x1 - x0);
         const GLsizei h = keel::max(0, y1Top - y0Top);
-        const GLint glY = static_cast<GLint>(m_impl->fbHeight) - y1Top;
+        const GLint glY = keel::as<GLint>(m_impl->fbHeight) - y1Top;
         gl.Enable(kGlScissorTest);
         gl.Scissor(x0, keel::max(0, glY), w, h);
         gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
@@ -1438,20 +1438,20 @@ void GlEs3Canvas::DrawRect(Rect rect, Color fill) {
 
 void GlEs3Canvas::DrawRoundRect(
     Rect rect,
-    float radius,
+    keel::f32 radius,
     Color fill,
     Color stroke,
-    float strokeWidth
+    keel::f32 strokeWidth
 ) {
     if (rect.w <= 0.0f || rect.h <= 0.0f) return;
     const bool hasFill = (fill.a > 0u);
     const bool hasStroke = (stroke.a > 0u && strokeWidth > 0.0f);
     if (!hasFill && !hasStroke) return;
 
-    const float eff = m_impl->EffScale();
+    const keel::f32 eff = m_impl->EffScale();
     const Rect pr = m_impl->PxRect(rect);
-    const float rPx = keel::max(0.0f, radius * eff);
-    const float swPx = hasStroke ? keel::max(1.0f, strokeWidth * eff) : 0.0f;
+    const keel::f32 rPx = keel::max(0.0f, radius * eff);
+    const keel::f32 swPx = hasStroke ? keel::max(1.0f, strokeWidth * eff) : 0.0f;
 
     m_impl->PushQuad(QuadInstance{
         pr.x, pr.y, pr.w, pr.h,
@@ -1462,29 +1462,29 @@ void GlEs3Canvas::DrawRoundRect(
     }, 0u);
 }
 
-Vec2 GlEs3Canvas::MeasureText(keel::StringRef text, float fontSize) {
+Vec2 GlEs3Canvas::MeasureText(keel::StringRef text, keel::f32 fontSize) {
     return MeasureTextStyled(text, fontSize, FontStyle::Regular);
 }
 
-Vec2 GlEs3Canvas::MeasureTextStyled(keel::StringRef text, float fontSize, FontStyle style) {
+Vec2 GlEs3Canvas::MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, FontStyle style) {
     if (fontSize <= 0.0f) return {0.0f, 0.0f};
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     if (m_impl->ft.HasFontForStyle(style)) {
-        const float eff = m_impl->EffScale();
+        const keel::f32 eff = m_impl->EffScale();
         const Vec2 px = m_impl->ft.MeasureText(text, fontSize * eff, style, m_impl->textSettings.hinting);
         return {px.x / eff, px.y / eff};
     }
 #endif
-    const float ratio = (style == FontStyle::Monospace) ? 0.60f : kDefaultCharAdvanceRatio;
-    const float w = static_cast<float>(CountUtf8Codepoints(text)) * (fontSize * ratio);
+    const keel::f32 ratio = (style == FontStyle::Monospace) ? 0.60f : kDefaultCharAdvanceRatio;
+    const keel::f32 w = keel::as<keel::f32>(CountUtf8Codepoints(text)) * (fontSize * ratio);
     return {w, GetLineHeight(fontSize)};
 }
 
-float GlEs3Canvas::GetLineHeight(float fontSize) {
+keel::f32 GlEs3Canvas::GetLineHeight(keel::f32 fontSize) {
     if (fontSize <= 0.0f) return 0.0f;
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     if (m_impl->ft.HasFontForStyle(FontStyle::Regular)) {
-        const float eff = m_impl->EffScale();
+        const keel::f32 eff = m_impl->EffScale();
         FreeTypeTextEngine::FontMetrics fm{};
         if (m_impl->ft.GetFontMetrics(fontSize * eff, FontStyle::Regular, m_impl->textSettings.hinting, fm)) {
             return fm.lineHeightPx / eff;
@@ -1494,25 +1494,25 @@ float GlEs3Canvas::GetLineHeight(float fontSize) {
     return fontSize * kDefaultLineHeightMultiplier;
 }
 
-void GlEs3Canvas::DrawText(keel::StringRef text, Vec2 pos, float fontSize, Color color) {
+void GlEs3Canvas::DrawText(keel::StringRef text, Vec2 pos, keel::f32 fontSize, Color color) {
     DrawTextStyled(text, pos, fontSize, color, FontStyle::Regular, 0.0f);
 }
 
 void GlEs3Canvas::DrawTextStyled(
     keel::StringRef text,
     Vec2 pos,
-    float fontSize,
+    keel::f32 fontSize,
     Color color,
     FontStyle style,
-    float angleDeg
+    keel::f32 angleDeg
 ) {
     if (!m_impl->initialized || text.empty() || fontSize <= 0.0f || color.a == 0u) return;
 
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     if (!m_impl->ft.HasFontForStyle(style)) return;
 
-    const float eff = m_impl->EffScale();
-    const float scaledPx = fontSize * eff;
+    const keel::f32 eff = m_impl->EffScale();
+    const keel::f32 scaledPx = fontSize * eff;
     FreeTypeTextEngine::FontMetrics fm{};
     if (!m_impl->ft.GetFontMetrics(scaledPx, style, m_impl->textSettings.hinting, fm)) {
         return;
@@ -1520,9 +1520,9 @@ void GlEs3Canvas::DrawTextStyled(
 
     const Vec2 originPx = m_impl->PxPt(pos);
     const bool hasRot = (keel::abs(angleDeg) > 0.01f);
-    const float rad = hasRot ? keel::deg_to_rad(angleDeg) : 0.0f;
-    const float cosA = hasRot ? keel::cos(rad) : 1.0f;
-    const float sinA = hasRot ? keel::sin(rad) : 0.0f;
+    const keel::f32 rad = hasRot ? keel::deg_to_rad(angleDeg) : 0.0f;
+    const keel::f32 cosA = hasRot ? keel::cos(rad) : 1.0f;
+    const keel::f32 sinA = hasRot ? keel::sin(rad) : 0.0f;
 
     const FontSmoothing effSmooth = hasRot
         ? FontSmoothing::Grayscale
@@ -1531,23 +1531,23 @@ void GlEs3Canvas::DrawTextStyled(
     const bool bgrOrder = (effSmooth == FontSmoothing::SubpixelBGR);
     const bool useSubPhase = (!hasRot && m_impl->textSettings.hinting != FontHinting::Normal);
 
-    const float clampedContrast = keel::clamp(m_impl->textSettings.contrast, 0.5f, 2.0f);
-    const float invContrast = 1.0f / clampedContrast;
-    const float sizeFactor = keel::clamp((28.0f - scaledPx) / 16.0f, 0.0f, 1.0f);
-    const float effDarken = keel::clamp(m_impl->textSettings.stemDarkening, 0.0f, 0.5f) * sizeFactor;
-    const float gammaFlag = m_impl->textSettings.gammaCorrectBlending ? 1.0f : 0.0f;
+    const keel::f32 clampedContrast = keel::clamp(m_impl->textSettings.contrast, 0.5f, 2.0f);
+    const keel::f32 invContrast = 1.0f / clampedContrast;
+    const keel::f32 sizeFactor = keel::clamp((28.0f - scaledPx) / 16.0f, 0.0f, 1.0f);
+    const keel::f32 effDarken = keel::clamp(m_impl->textSettings.stemDarkening, 0.0f, 0.5f) * sizeFactor;
+    const keel::f32 gammaFlag = m_impl->textSettings.gammaCorrectBlending ? 1.0f : 0.0f;
 
-    const float glyphMode = useLcd
+    const keel::f32 glyphMode = useLcd
         ? (bgrOrder ? kModeGlyphLcdBgr : kModeGlyphLcdRgb)
         : kModeGlyphR8;
-    const keel::u32 lcdRgbKey = static_cast<keel::u32>(color.r) |
-                                (static_cast<keel::u32>(color.g) << 8) |
-                                (static_cast<keel::u32>(color.b) << 16);
+    const keel::u32 lcdRgbKey = keel::as<keel::u32>(color.r) |
+                                (keel::as<keel::u32>(color.g) << 8) |
+                                (keel::as<keel::u32>(color.b) << 16);
 
-    float penX = hasRot ? 0.0f : originPx.x;
-    const float baselineY = hasRot ? fm.ascentPx : keel::round(originPx.y + fm.ascentPx);
-    const float pivotX = hasRot ? originPx.x : 0.0f;
-    const float pivotY = hasRot ? originPx.y : 0.0f;
+    keel::f32 penX = hasRot ? 0.0f : originPx.x;
+    const keel::f32 baselineY = hasRot ? fm.ascentPx : keel::round(originPx.y + fm.ascentPx);
+    const keel::f32 pivotX = hasRot ? originPx.x : 0.0f;
+    const keel::f32 pivotY = hasRot ? originPx.y : 0.0f;
 
     keel::u32 prevCp = 0u;
     keel::usize offset = 0u;
@@ -1555,7 +1555,7 @@ void GlEs3Canvas::DrawTextStyled(
         const keel::u32 cp = keel::utf8_decode_next(text, offset);
         if (cp == '\n' || cp == '\r') continue;
         if (cp == '\t') {
-            if (const auto* sp = m_impl->ResolveAtlasGlyph(static_cast<keel::u32>(' '), scaledPx, style, 0u)) {
+            if (const auto* sp = m_impl->ResolveAtlasGlyph(keel::as<keel::u32>(' '), scaledPx, style, 0u)) {
                 penX += (sp->advancePx > 0.0f) ? (sp->advancePx * 4.0f) : (scaledPx * 2.4f);
             } else {
                 penX += scaledPx * 2.4f;
@@ -1567,13 +1567,13 @@ void GlEs3Canvas::DrawTextStyled(
             penX += m_impl->ft.GetKerningPx(prevCp, cp, scaledPx, style, m_impl->textSettings.hinting);
         }
 
-        float cellX = penX;
+        keel::f32 cellX = penX;
         keel::u8 phase = 0u;
         if (!hasRot) {
             if (useSubPhase) {
                 const keel::i32 qx = keel::round_i32(penX * 4.0f);
-                cellX = static_cast<float>(qx >> 2);
-                phase = static_cast<keel::u8>(qx & 3);
+                cellX = keel::as<keel::f32>(qx >> 2);
+                phase = keel::as<keel::u8>(qx & 3);
             } else {
                 cellX = keel::round(penX);
             }
@@ -1588,11 +1588,11 @@ void GlEs3Canvas::DrawTextStyled(
         }
 
         if (!ag->empty) {
-            const float gx = cellX + static_cast<float>(ag->bearingX);
-            const float gy = baselineY - static_cast<float>(ag->bearingY);
+            const keel::f32 gx = cellX + keel::as<keel::f32>(ag->bearingX);
+            const keel::f32 gy = baselineY - keel::as<keel::f32>(ag->bearingY);
             const GLuint tex = useLcd ? m_impl->atlasLcdTex : m_impl->atlasTex;
             m_impl->PushQuad(QuadInstance{
-                gx, gy, static_cast<float>(ag->width), static_cast<float>(ag->height),
+                gx, gy, keel::as<keel::f32>(ag->width), keel::as<keel::f32>(ag->height),
                 ag->u0, ag->v0, ag->u1, ag->v1,
                 color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
                 pivotX, pivotY, invContrast, gammaFlag,
@@ -1612,10 +1612,10 @@ void GlEs3Canvas::DrawTextStyled(
 void GlEs3Canvas::DrawTextBox(
     keel::StringRef text,
     Rect bounds,
-    float fontSize,
+    keel::f32 fontSize,
     Color color,
-    float alignX,
-    float alignY
+    keel::f32 alignX,
+    keel::f32 alignY
 ) {
     DrawTextBoxStyled(text, bounds, fontSize, color, FontStyle::Regular, alignX, alignY);
 }
@@ -1623,11 +1623,11 @@ void GlEs3Canvas::DrawTextBox(
 void GlEs3Canvas::DrawTextBoxStyled(
     keel::StringRef text,
     Rect bounds,
-    float fontSize,
+    keel::f32 fontSize,
     Color color,
     FontStyle style,
-    float alignX,
-    float alignY
+    keel::f32 alignX,
+    keel::f32 alignY
 ) {
     if (!m_impl->initialized || text.empty() || fontSize <= 0.0f || color.a == 0u ||
         bounds.w <= 0.0f || bounds.h <= 0.0f) {
@@ -1642,18 +1642,18 @@ void GlEs3Canvas::DrawTextBoxStyled(
     }
 
     const Vec2 dims = MeasureTextStyled(drawStr, fontSize, style);
-    const float x = bounds.x + keel::max(0.0f, (bounds.w - dims.x) * alignX);
-    float y = bounds.y + (bounds.h - dims.y) * alignY;
+    const keel::f32 x = bounds.x + keel::max(0.0f, (bounds.w - dims.x) * alignX);
+    keel::f32 y = bounds.y + (bounds.h - dims.y) * alignY;
 
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     if (m_impl->ft.HasFontForStyle(style)) {
-        const float eff = m_impl->EffScale();
+        const keel::f32 eff = m_impl->EffScale();
         FreeTypeTextEngine::FontMetrics fm{};
         if (m_impl->ft.GetFontMetrics(fontSize * eff, style, m_impl->textSettings.hinting, fm)) {
-            const float asc = fm.ascentPx / eff;
-            const float cap = fm.capHeightPx / eff;
+            const keel::f32 asc = fm.ascentPx / eff;
+            const keel::f32 cap = fm.capHeightPx / eff;
             if (alignY > 0.4f && alignY < 0.6f) {
-                const float capTop = bounds.y + (bounds.h - cap) * 0.5f;
+                const keel::f32 capTop = bounds.y + (bounds.h - cap) * 0.5f;
                 y = capTop - (asc - cap);
             }
         }
@@ -1665,18 +1665,18 @@ void GlEs3Canvas::DrawTextBoxStyled(
     PopClip();
 }
 
-void GlEs3Canvas::DrawLine(Vec2 p1, Vec2 p2, Color color, float strokeWidth) {
+void GlEs3Canvas::DrawLine(Vec2 p1, Vec2 p2, Color color, keel::f32 strokeWidth) {
     if (!m_impl->initialized || color.a == 0u || strokeWidth <= 0.0f) return;
-    const float eff = m_impl->EffScale();
+    const keel::f32 eff = m_impl->EffScale();
     const Vec2 a = m_impl->PxPt(p1);
     const Vec2 b = m_impl->PxPt(p2);
-    const float swPx = keel::max(1.0f, strokeWidth * eff);
-    const float halfW = swPx * 0.5f + 1.0f;
+    const keel::f32 swPx = keel::max(1.0f, strokeWidth * eff);
+    const keel::f32 halfW = swPx * 0.5f + 1.0f;
 
-    const float minX = keel::min(a.x, b.x) - halfW;
-    const float minY = keel::min(a.y, b.y) - halfW;
-    const float maxX = keel::max(a.x, b.x) + halfW;
-    const float maxY = keel::max(a.y, b.y) + halfW;
+    const keel::f32 minX = keel::min(a.x, b.x) - halfW;
+    const keel::f32 minY = keel::min(a.y, b.y) - halfW;
+    const keel::f32 maxX = keel::max(a.x, b.x) + halfW;
+    const keel::f32 maxY = keel::max(a.y, b.y) + halfW;
 
     m_impl->PushQuad(QuadInstance{
         minX, minY, maxX - minX, maxY - minY,
@@ -1693,7 +1693,7 @@ void GlEs3Canvas::DrawTriangle(
     Vec2 p3,
     Color fill,
     Color stroke,
-    float strokeWidth
+    keel::f32 strokeWidth
 ) {
     if (!m_impl->initialized) return;
     if (fill.a > 0u) {
@@ -1738,13 +1738,13 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
             }
             if (poly.size() >= 3u) {
                 // Compute signed area to determine winding
-                double area2 = 0.0;
+                keel::f64 area2 = 0.0;
                 for (keel::usize i = 0; i < poly.size(); ++i) {
                     const Vec2& p0 = poly[i];
                     const Vec2& p1 = poly[(i + 1u) % poly.size()];
-                    area2 += static_cast<double>(p0.x) * p1.y - static_cast<double>(p1.x) * p0.y;
+                    area2 += keel::as<keel::f64>(p0.x) * p1.y - keel::as<keel::f64>(p1.x) * p0.y;
                 }
-                const float winding = (area2 >= 0.0) ? 1.0f : -1.0f;
+                const keel::f32 winding = (area2 >= 0.0) ? 1.0f : -1.0f;
 
                 keel::Array<keel::usize> idx;
                 idx.reserve(poly.size());
@@ -1790,24 +1790,24 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
         if (doStroke) {
             const keel::usize segCount = subClosed ? sub.size() : (sub.size() - 1u);
             if (paint.dashed && paint.dashOnPx > 0.0f && paint.dashOffPx > 0.0f) {
-                const float dashOn = paint.dashOnPx;
-                const float period = dashOn + paint.dashOffPx;
-                float phase = 0.0f;
+                const keel::f32 dashOn = paint.dashOnPx;
+                const keel::f32 period = dashOn + paint.dashOffPx;
+                keel::f32 phase = 0.0f;
                 for (keel::usize i = 0; i < segCount; ++i) {
                     const Vec2 a = sub[i];
                     const Vec2 b = sub[(i + 1u) % sub.size()];
-                    const float dx = b.x - a.x;
-                    const float dy = b.y - a.y;
-                    const float segLen = keel::hypot(dx, dy);
+                    const keel::f32 dx = b.x - a.x;
+                    const keel::f32 dy = b.y - a.y;
+                    const keel::f32 segLen = keel::hypot(dx, dy);
                     if (segLen <= 1e-4f) continue;
-                    const float invLen = 1.0f / segLen;
-                    const float ux = dx * invLen;
-                    const float uy = dy * invLen;
-                    float dist = 0.0f;
+                    const keel::f32 invLen = 1.0f / segLen;
+                    const keel::f32 ux = dx * invLen;
+                    const keel::f32 uy = dy * invLen;
+                    keel::f32 dist = 0.0f;
                     while (dist < segLen - 1e-4f) {
-                        const float remain = segLen - dist;
+                        const keel::f32 remain = segLen - dist;
                         if (phase < dashOn) {
-                            const float step = keel::min(remain, dashOn - phase);
+                            const keel::f32 step = keel::min(remain, dashOn - phase);
                             DrawLine(
                                 Vec2{a.x + ux * dist, a.y + uy * dist},
                                 Vec2{a.x + ux * (dist + step), a.y + uy * (dist + step)},
@@ -1817,7 +1817,7 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
                             dist += step;
                             phase += step;
                         } else {
-                            const float step = keel::min(remain, period - phase);
+                            const keel::f32 step = keel::min(remain, period - phase);
                             dist += step;
                             phase += step;
                         }
@@ -1876,13 +1876,13 @@ Vec2 GlEs3Canvas::GetImageSize(keel::StringRef source) {
     if (!m_impl) return {0.0f, 0.0f};
     const auto* img = m_impl->ResolveImage(source, /*requireTexture=*/false);
     if (!img || !img->valid) return {0.0f, 0.0f};
-    return {static_cast<float>(img->width), static_cast<float>(img->height)};
+    return {keel::as<keel::f32>(img->width), keel::as<keel::f32>(img->height)};
 }
 
 bool GlEs3Canvas::DrawImage(
     keel::StringRef source,
     Rect destRect,
-    float cornerRadius,
+    keel::f32 cornerRadius,
     keel::u8 opacity
 ) {
     if (!m_impl || !m_impl->initialized || source.empty() || opacity == 0u ||
@@ -1896,7 +1896,7 @@ bool GlEs3Canvas::DrawImage(
     }
     img->lastUsedFrame = m_impl->frameCounter;
 
-    const float eff = m_impl->EffScale();
+    const keel::f32 eff = m_impl->EffScale();
     const Rect pr = m_impl->PxRect(destRect);
     m_impl->PushQuad(QuadInstance{
         pr.x, pr.y, pr.w, pr.h,
@@ -1911,7 +1911,7 @@ bool GlEs3Canvas::DrawImage(
 bool GlEs3Canvas::DrawPixels(
     PixelRef pixels,
     Rect destRect,
-    float cornerRadius,
+    keel::f32 cornerRadius,
     keel::u8 opacity
 ) {
     if (!m_impl->initialized || pixels.Empty() || opacity == 0u ||
@@ -1929,10 +1929,10 @@ bool GlEs3Canvas::DrawPixels(
     keel::Array<keel::u32> packed;
     const keel::u32* uploadPtr = pixels.Data();
     if (pixels.RowStride() != w) {
-        packed.resize(static_cast<keel::usize>(w) * h);
+        packed.resize(keel::as<keel::usize>(w) * h);
         for (keel::u32 y = 0; y < h; ++y) {
             const auto row = pixels.Row(y);
-            keel::mem_copy(packed.data() + static_cast<keel::usize>(y) * w, row.data(), static_cast<keel::usize>(w) * sizeof(keel::u32));
+            keel::mem_copy(packed.data() + keel::as<keel::usize>(y) * w, row.data(), keel::as<keel::usize>(w) * sizeof(keel::u32));
         }
         uploadPtr = packed.data();
     }
@@ -1945,9 +1945,9 @@ bool GlEs3Canvas::DrawPixels(
         gl.TexImage2D(
             kGlTexture2D,
             0,
-            static_cast<GLint>(kGlRgba8),
-            static_cast<GLsizei>(w),
-            static_cast<GLsizei>(h),
+            keel::as<GLint>(kGlRgba8),
+            keel::as<GLsizei>(w),
+            keel::as<GLsizei>(h),
             0,
             kGlRgba,
             kGlUnsignedByte,
@@ -1959,15 +1959,15 @@ bool GlEs3Canvas::DrawPixels(
             0,
             0,
             0,
-            static_cast<GLsizei>(w),
-            static_cast<GLsizei>(h),
+            keel::as<GLsizei>(w),
+            keel::as<GLsizei>(h),
             kGlRgba,
             kGlUnsignedByte,
             uploadPtr
         );
     }
 
-    const float eff = m_impl->EffScale();
+    const keel::f32 eff = m_impl->EffScale();
     const Rect pr = m_impl->PxRect(destRect);
     m_impl->PushQuad(QuadInstance{
         pr.x, pr.y, pr.w, pr.h,
@@ -1997,7 +1997,7 @@ void GlEs3Canvas::DrawTexture(
         tint.r / 255.0f, tint.g / 255.0f, tint.b / 255.0f, tint.a / 255.0f,
         0.0f, 0.0f, 0.0f, 0.0f,
         0.0f, 0.0f, kModeTexture, 0.0f
-    }, static_cast<GLuint>(textureId));
+    }, keel::as<GLuint>(textureId));
 }
 
 void GlEs3Canvas::SetGpuShadersEnabled(bool enabled) noexcept {
@@ -2023,8 +2023,8 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
         return false;
     }
 
-    const keel::u32 texH = static_cast<keel::u32>(pass.dataField.extent(0));
-    const keel::u32 texW = static_cast<keel::u32>(pass.dataField.extent(1));
+    const keel::u32 texH = keel::as<keel::u32>(pass.dataField.extent(0));
+    const keel::u32 texW = keel::as<keel::u32>(pass.dataField.extent(1));
     if (texW == 0u || texH == 0u) {
         return false;
     }
@@ -2057,7 +2057,7 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
     }
     wt->lastUsedFrame = m_impl->frameCounter;
 
-    const float invNormScale = 1.0f / keel::max(1e-6f, pass.dataNormScale);
+    const keel::f32 invNormScale = 1.0f / keel::max(1e-6f, pass.dataNormScale);
     const bool needFullUpload = (wt->dataTex == 0u || wt->texW != texW || wt->texH != texH ||
                                  wt->fullGen != pass.fullGeneration);
     if (needFullUpload) {
@@ -2066,15 +2066,15 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
         }
         gl.ActiveTexture(kGlTexture0);
         gl.BindTexture(kGlTexture2D, wt->dataTex);
-        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlNearest));
-        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlNearest));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
         gl.PixelStorei(kGlUnpackAlignment, 4);
 
-        const keel::usize count = static_cast<keel::usize>(texW) * texH;
+        const keel::usize count = keel::as<keel::usize>(texW) * texH;
         m_impl->gpuRgbaScratch.resize(count);
-        const float* src = pass.dataField.data();
+        const keel::f32* src = pass.dataField.data();
         for (keel::usize i = 0u; i < count; ++i) {
             m_impl->gpuRgbaScratch[i] = PackRG16Norm((src[i] - pass.dataNormOffset) * invNormScale);
         }
@@ -2085,9 +2085,9 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
             gl.TexImage2D(
                 kGlTexture2D,
                 0,
-                static_cast<GLint>(kGlRgba8),
-                static_cast<GLsizei>(texW),
-                static_cast<GLsizei>(texH),
+                keel::as<GLint>(kGlRgba8),
+                keel::as<GLsizei>(texW),
+                keel::as<GLsizei>(texH),
                 0,
                 kGlRgba,
                 kGlUnsignedByte,
@@ -2099,8 +2099,8 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
                 0,
                 0,
                 0,
-                static_cast<GLsizei>(texW),
-                static_cast<GLsizei>(texH),
+                keel::as<GLsizei>(texW),
+                keel::as<GLsizei>(texH),
                 kGlRgba,
                 kGlUnsignedByte,
                 m_impl->gpuRgbaScratch.data()
@@ -2111,7 +2111,7 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
     } else if (pass.sliceGeneration != 0u && wt->sliceGen != pass.sliceGeneration && pass.headRow < texH) {
         // O(1) ring-buffer row update (Waterfall / live spectrogram)
         m_impl->gpuRgbaScratch.resize(texW);
-        const float* rowSrc = pass.dataField.data() + static_cast<keel::usize>(pass.headRow) * texW;
+        const keel::f32* rowSrc = pass.dataField.data() + keel::as<keel::usize>(pass.headRow) * texW;
         for (keel::u32 x = 0u; x < texW; ++x) {
             m_impl->gpuRgbaScratch[x] = PackRG16Norm((rowSrc[x] - pass.dataNormOffset) * invNormScale);
         }
@@ -2122,8 +2122,8 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
             kGlTexture2D,
             0,
             0,
-            static_cast<GLint>(pass.headRow),
-            static_cast<GLsizei>(texW),
+            keel::as<GLint>(pass.headRow),
+            keel::as<GLsizei>(texW),
             1,
             kGlRgba,
             kGlUnsignedByte,
@@ -2139,15 +2139,15 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
             }
             gl.ActiveTexture(kGlTexture1);
             gl.BindTexture(kGlTexture2D, wt->lutTex);
-            gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlLinear));
-            gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlLinear));
-            gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
-            gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+            gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
             gl.PixelStorei(kGlUnpackAlignment, 4);
             gl.TexImage2D(
                 kGlTexture2D,
                 0,
-                static_cast<GLint>(kGlRgba8),
+                keel::as<GLint>(kGlRgba8),
                 256,
                 1,
                 0,
@@ -2163,24 +2163,24 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
     // Apply clip scissor for this GPU pass
     const GLint scX0 = keel::max(0, keel::floor_i32(clipPx.x));
     const GLint scY0Top = keel::max(0, keel::floor_i32(clipPx.y));
-    const GLint scX1 = keel::min(static_cast<GLint>(m_impl->fbWidth), keel::ceil_i32(clipPx.Right()));
-    const GLint scY1Top = keel::min(static_cast<GLint>(m_impl->fbHeight), keel::ceil_i32(clipPx.Bottom()));
+    const GLint scX1 = keel::min(keel::as<GLint>(m_impl->fbWidth), keel::ceil_i32(clipPx.Right()));
+    const GLint scY1Top = keel::min(keel::as<GLint>(m_impl->fbHeight), keel::ceil_i32(clipPx.Bottom()));
     const GLsizei scW = keel::max(0, scX1 - scX0);
     const GLsizei scH = keel::max(0, scY1Top - scY0Top);
-    const GLint scGlY = static_cast<GLint>(m_impl->fbHeight) - scY1Top;
+    const GLint scGlY = keel::as<GLint>(m_impl->fbHeight) - scY1Top;
 
     gl.Enable(kGlScissorTest);
     gl.Scissor(scX0, keel::max(0, scGlY), scW, scH);
 
     gl.UseProgram(prog->program);
     if (prog->locViewport >= 0) {
-        gl.Uniform2f(prog->locViewport, static_cast<float>(m_impl->fbWidth), static_cast<float>(m_impl->fbHeight));
+        gl.Uniform2f(prog->locViewport, keel::as<keel::f32>(m_impl->fbWidth), keel::as<keel::f32>(m_impl->fbHeight));
     }
     if (prog->locPlotRect >= 0) {
         gl.Uniform4f(prog->locPlotRect, plotPx.x, plotPx.y, plotPx.w, plotPx.h);
     }
     if (prog->locGridDims >= 0) {
-        gl.Uniform2f(prog->locGridDims, static_cast<float>(texW), static_cast<float>(texH));
+        gl.Uniform2f(prog->locGridDims, keel::as<keel::f32>(texW), keel::as<keel::f32>(texH));
     }
     if (prog->locBgColor >= 0) {
         gl.Uniform3f(

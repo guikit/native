@@ -5,7 +5,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     bool autopilot = true;
     bool darkMode = true;
-    float thrustPct = 72.5f;
+    keel::f32 thrustPct = 72.5f;
     keel::i32 pulseCount = 0;
     keel::String stationName = keel::String::from("ALPHA-07");
 

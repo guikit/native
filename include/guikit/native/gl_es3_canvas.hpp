@@ -39,11 +39,11 @@ public:
         keel::StringRef mimeType = "ttf"
     ) override;
 
-    void Begin(keel::u32 width, keel::u32 height, float scale = 1.0f) override;
+    void Begin(keel::u32 width, keel::u32 height, keel::f32 scale = 1.0f) override;
     void End() override;
 
-    [[nodiscard]] float GetScale() const noexcept override;
-    void SetScale(float scale) override;
+    [[nodiscard]] keel::f32 GetScale() const noexcept override;
+    void SetScale(keel::f32 scale) override;
 
     void PushTransform(const Transform2D& transform) override;
     void PopTransform() override;
@@ -57,51 +57,51 @@ public:
     void DrawRect(Rect rect, Color fill) override;
     void DrawRoundRect(
         Rect rect,
-        float radius,
+        keel::f32 radius,
         Color fill,
         Color stroke = Color(0, 0, 0, 0),
-        float strokeWidth = 0.0f
+        keel::f32 strokeWidth = 0.0f
     ) override;
 
-    Vec2 MeasureText(keel::StringRef text, float fontSize) override;
-    Vec2 MeasureTextStyled(keel::StringRef text, float fontSize, FontStyle style) override;
-    [[nodiscard]] float GetLineHeight(float fontSize) override;
+    Vec2 MeasureText(keel::StringRef text, keel::f32 fontSize) override;
+    Vec2 MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, FontStyle style) override;
+    [[nodiscard]] keel::f32 GetLineHeight(keel::f32 fontSize) override;
 
-    void DrawText(keel::StringRef text, Vec2 pos, float fontSize, Color color) override;
+    void DrawText(keel::StringRef text, Vec2 pos, keel::f32 fontSize, Color color) override;
     void DrawTextStyled(
         keel::StringRef text,
         Vec2 pos,
-        float fontSize,
+        keel::f32 fontSize,
         Color color,
         FontStyle style,
-        float angleDeg = 0.0f
+        keel::f32 angleDeg = 0.0f
     ) override;
     void DrawTextBox(
         keel::StringRef text,
         Rect bounds,
-        float fontSize,
+        keel::f32 fontSize,
         Color color,
-        float alignX = 0.0f,
-        float alignY = 0.5f
+        keel::f32 alignX = 0.0f,
+        keel::f32 alignY = 0.5f
     ) override;
     void DrawTextBoxStyled(
         keel::StringRef text,
         Rect bounds,
-        float fontSize,
+        keel::f32 fontSize,
         Color color,
         FontStyle style,
-        float alignX = 0.0f,
-        float alignY = 0.5f
+        keel::f32 alignX = 0.0f,
+        keel::f32 alignY = 0.5f
     ) override;
 
-    void DrawLine(Vec2 p1, Vec2 p2, Color color, float strokeWidth = 1.0f) override;
+    void DrawLine(Vec2 p1, Vec2 p2, Color color, keel::f32 strokeWidth = 1.0f) override;
     void DrawTriangle(
         Vec2 p1,
         Vec2 p2,
         Vec2 p3,
         Color fill,
         Color stroke = Color(0, 0, 0, 0),
-        float strokeWidth = 0.0f
+        keel::f32 strokeWidth = 0.0f
     ) override;
     void DrawPath(const VectorPath& path, const PathPaint& paint) override;
 
@@ -109,14 +109,14 @@ public:
     bool DrawImage(
         keel::StringRef source,
         Rect destRect,
-        float cornerRadius = 0.0f,
+        keel::f32 cornerRadius = 0.0f,
         keel::u8 opacity = 255
     ) override;
 
     bool DrawPixels(
         PixelRef pixels,
         Rect destRect,
-        float cornerRadius = 0.0f,
+        keel::f32 cornerRadius = 0.0f,
         keel::u8 opacity = 255
     ) override;
     void DrawTexture(

@@ -32,8 +32,8 @@ public:
 
     [[nodiscard]] keel::i32 GetFramebufferWidth() const noexcept override;
     [[nodiscard]] keel::i32 GetFramebufferHeight() const noexcept override;
-    [[nodiscard]] float GetDpiScale() const noexcept override;
-    [[nodiscard]] float GetDisplayPixelsPerMm() const noexcept override;
+    [[nodiscard]] keel::f32 GetDpiScale() const noexcept override;
+    [[nodiscard]] keel::f32 GetDisplayPixelsPerMm() const noexcept override;
     [[nodiscard]] bool IsMinimized() const noexcept override;
     [[nodiscard]] bool IsLiveResizeFrame() const noexcept override;
 

@@ -13,21 +13,21 @@ static constexpr keel::u32 kMaxPngDim = 4096u;
 static constexpr keel::usize kMaxIdatBytes = 64u * 1024u * 1024u;
 
 [[nodiscard]] inline keel::u32 ReadBe32(const keel::u8* p) noexcept {
-    return (static_cast<keel::u32>(p[0]) << 24) |
-           (static_cast<keel::u32>(p[1]) << 16) |
-           (static_cast<keel::u32>(p[2]) << 8) |
-           static_cast<keel::u32>(p[3]);
+    return (keel::as<keel::u32>(p[0]) << 24) |
+           (keel::as<keel::u32>(p[1]) << 16) |
+           (keel::as<keel::u32>(p[2]) << 8) |
+           keel::as<keel::u32>(p[3]);
 }
 
 [[nodiscard]] inline keel::u16 ReadBe16(const keel::u8* p) noexcept {
-    return static_cast<keel::u16>((static_cast<keel::u32>(p[0]) << 8) | static_cast<keel::u32>(p[1]));
+    return keel::as<keel::u16>((keel::as<keel::u32>(p[0]) << 8) | keel::as<keel::u32>(p[1]));
 }
 
 [[nodiscard]] inline keel::u32 PackRgba(keel::u8 r, keel::u8 g, keel::u8 b, keel::u8 a) noexcept {
-    return static_cast<keel::u32>(r) |
-           (static_cast<keel::u32>(g) << 8) |
-           (static_cast<keel::u32>(b) << 16) |
-           (static_cast<keel::u32>(a) << 24);
+    return keel::as<keel::u32>(r) |
+           (keel::as<keel::u32>(g) << 8) |
+           (keel::as<keel::u32>(b) << 16) |
+           (keel::as<keel::u32>(a) << 24);
 }
 
 [[nodiscard]] inline keel::u8 PaethPredictor(keel::i32 a, keel::i32 b, keel::i32 c) noexcept {
@@ -35,9 +35,9 @@ static constexpr keel::usize kMaxIdatBytes = 64u * 1024u * 1024u;
     const keel::i32 pa = keel::abs(p - a);
     const keel::i32 pb = keel::abs(p - b);
     const keel::i32 pc = keel::abs(p - c);
-    if (pa <= pb && pa <= pc) return static_cast<keel::u8>(a);
-    if (pb <= pc) return static_cast<keel::u8>(b);
-    return static_cast<keel::u8>(c);
+    if (pa <= pb && pa <= pc) return keel::as<keel::u8>(a);
+    if (pb <= pc) return keel::as<keel::u8>(b);
+    return keel::as<keel::u8>(c);
 }
 
 // ============================================================================
@@ -52,7 +52,7 @@ struct BitReader {
 
     inline void Fill(keel::i32 needed) noexcept {
         while (count < needed && ptr < end) {
-            buf |= static_cast<keel::u64>(*ptr++) << count;
+            buf |= keel::as<keel::u64>(*ptr++) << count;
             count += 8;
         }
     }
@@ -63,7 +63,7 @@ struct BitReader {
             out = 0u;
             return false;
         }
-        out = static_cast<keel::u32>(buf & ((1ULL << n) - 1ULL));
+        out = keel::as<keel::u32>(buf & ((1ULL << n) - 1ULL));
         buf >>= n;
         count -= n;
         return true;
@@ -118,10 +118,10 @@ struct HuffTable {
         for (keel::u32 bits = 1u; bits <= kMaxBits; ++bits) {
             code <<= 1;
             left <<= 1;
-            left -= static_cast<keel::i32>(counts[bits]);
+            left -= keel::as<keel::i32>(counts[bits]);
             if (left < 0) return false; // Over-subscribed Huffman tree
-            firstCode[bits] = static_cast<keel::u16>(code);
-            firstSymbol[bits] = static_cast<keel::u16>(symOffset);
+            firstCode[bits] = keel::as<keel::u16>(code);
+            firstSymbol[bits] = keel::as<keel::u16>(symOffset);
             code += counts[bits];
             symOffset += counts[bits];
         }
@@ -135,12 +135,12 @@ struct HuffTable {
             const keel::u32 len = lengths[sym];
             if (len == 0u) continue;
             const keel::u32 idx = nextPos[len]++;
-            symbols[idx] = static_cast<keel::u16>(sym);
+            symbols[idx] = keel::as<keel::u16>(sym);
             if (len <= kFastBits) {
-                const keel::u32 canonicalCode = static_cast<keel::u32>(firstCode[len]) + (idx - firstSymbol[len]);
+                const keel::u32 canonicalCode = keel::as<keel::u32>(firstCode[len]) + (idx - firstSymbol[len]);
                 const keel::u32 rev = ReverseBits(canonicalCode, len);
                 const keel::u32 step = 1u << len;
-                const keel::u16 entry = static_cast<keel::u16>((sym & 0x1FFu) | (len << 9));
+                const keel::u16 entry = keel::as<keel::u16>((sym & 0x1FFu) | (len << 9));
                 for (keel::u32 k = rev; k < kFastSize; k += step) {
                     fastLut[k] = entry;
                 }
@@ -150,15 +150,15 @@ struct HuffTable {
     }
 
     [[nodiscard]] bool Decode(BitReader& br, keel::u32& outSym) const noexcept {
-        br.Fill(static_cast<keel::i32>(kMaxBits));
+        br.Fill(keel::as<keel::i32>(kMaxBits));
         if (br.count <= 0) return false;
 
         const keel::u16 fast = fastLut[br.buf & (kFastSize - 1u)];
-        const keel::u32 fastLen = static_cast<keel::u32>(fast >> 9);
-        if (fastLen != 0u && br.count >= static_cast<keel::i32>(fastLen)) {
+        const keel::u32 fastLen = keel::as<keel::u32>(fast >> 9);
+        if (fastLen != 0u && br.count >= keel::as<keel::i32>(fastLen)) {
             br.buf >>= fastLen;
-            br.count -= static_cast<keel::i32>(fastLen);
-            outSym = static_cast<keel::u32>(fast & 0x1FFu);
+            br.count -= keel::as<keel::i32>(fastLen);
+            outSym = keel::as<keel::u32>(fast & 0x1FFu);
             return true;
         }
 
@@ -168,7 +168,7 @@ struct HuffTable {
                 br.Fill(1);
                 if (br.count <= 0) return false;
             }
-            code = (code << 1) | static_cast<keel::u32>(br.buf & 1u);
+            code = (code << 1) | keel::as<keel::u32>(br.buf & 1u);
             br.buf >>= 1;
             --br.count;
             const keel::u32 fc = firstCode[bits];
@@ -191,7 +191,7 @@ bool InflateZlib(
     const keel::u8 cmf = zlibData[0];
     const keel::u8 flg = zlibData[1];
     if ((cmf & 0x0Fu) != 8u) return false;
-    if ((((static_cast<keel::u32>(cmf) << 8) | flg) % 31u) != 0u) return false;
+    if ((((keel::as<keel::u32>(cmf) << 8) | flg) % 31u) != 0u) return false;
     if ((flg & 0x20u) != 0u) return false; // Preset dictionary not valid in PNG
 
     out.clear();
@@ -236,11 +236,11 @@ bool InflateZlib(
         if (btype == 0u) {
             br.AlignByteAndRewind();
             if (br.end - br.ptr < 4) return false;
-            const keel::u16 len = static_cast<keel::u16>(br.ptr[0] | (static_cast<keel::u32>(br.ptr[1]) << 8));
-            const keel::u16 nlen = static_cast<keel::u16>(br.ptr[2] | (static_cast<keel::u32>(br.ptr[3]) << 8));
+            const keel::u16 len = keel::as<keel::u16>(br.ptr[0] | (keel::as<keel::u32>(br.ptr[1]) << 8));
+            const keel::u16 nlen = keel::as<keel::u16>(br.ptr[2] | (keel::as<keel::u32>(br.ptr[3]) << 8));
             br.ptr += 4;
-            if (static_cast<keel::u16>(len ^ 0xFFFFu) != nlen) return false;
-            if (static_cast<keel::usize>(br.end - br.ptr) < len) return false;
+            if (keel::as<keel::u16>(len ^ 0xFFFFu) != nlen) return false;
+            if (keel::as<keel::usize>(br.end - br.ptr) < len) return false;
             if (out.size() + len > expectedBytes) return false;
             for (keel::u32 i = 0u; i < len; ++i) {
                 out.push_back(br.ptr[i]);
@@ -276,7 +276,7 @@ bool InflateZlib(
             for (keel::u32 i = 0u; i < hclen; ++i) {
                 keel::u32 v = 0u;
                 if (!br.ReadBits(3, v)) return false;
-                codeLens[kCodeLenOrder[i]] = static_cast<keel::u8>(v);
+                codeLens[kCodeLenOrder[i]] = keel::as<keel::u8>(v);
             }
             if (!codeTable.Build(codeLens, 19u)) return false;
 
@@ -287,7 +287,7 @@ bool InflateZlib(
                 keel::u32 sym = 0u;
                 if (!codeTable.Decode(br, sym)) return false;
                 if (sym < 16u) {
-                    allLens[idx++] = static_cast<keel::u8>(sym);
+                    allLens[idx++] = keel::as<keel::u8>(sym);
                 } else {
                     keel::u32 rep = 0u;
                     keel::u8 val = 0u;
@@ -322,7 +322,7 @@ bool InflateZlib(
             if (!litTable.Decode(br, sym)) return false;
             if (sym < 256u) {
                 if (out.size() >= expectedBytes) return false;
-                out.push_back(static_cast<keel::u8>(sym));
+                out.push_back(keel::as<keel::u8>(sym));
             } else if (sym == 256u) {
                 break;
             } else {
@@ -378,8 +378,8 @@ bool InflateZlib(
 }
 
 [[nodiscard]] keel::usize RowByteCount(keel::u32 width, keel::u32 channels, keel::u8 bitDepth) noexcept {
-    const keel::u64 bits = static_cast<keel::u64>(width) * channels * bitDepth;
-    return static_cast<keel::usize>((bits + 7u) / 8u);
+    const keel::u64 bits = keel::as<keel::u64>(width) * channels * bitDepth;
+    return keel::as<keel::usize>((bits + 7u) / 8u);
 }
 
 struct PngDecodeMeta {
@@ -401,9 +401,9 @@ struct PngDecodeMeta {
 [[nodiscard]] keel::u8 ExpandSubByteSample(keel::u32 rawVal, keel::u8 bitDepth) noexcept {
     switch (bitDepth) {
         case 1u: return rawVal ? 255u : 0u;
-        case 2u: return static_cast<keel::u8>(rawVal * 85u);
-        case 4u: return static_cast<keel::u8>(rawVal * 17u);
-        default: return static_cast<keel::u8>(rawVal & 0xFFu);
+        case 2u: return keel::as<keel::u8>(rawVal * 85u);
+        case 4u: return keel::as<keel::u8>(rawVal * 17u);
+        default: return keel::as<keel::u8>(rawVal & 0xFFu);
     }
 }
 
@@ -424,7 +424,7 @@ bool UnfilterAndBlitPass(
 
     const keel::usize rowBytes = RowByteCount(passW, meta.channels, meta.bitDepth);
     const keel::usize bpp = keel::max<keel::usize>(1u, (meta.channels * meta.bitDepth + 7u) / 8u);
-    const keel::usize needed = static_cast<keel::usize>(passH) * (1u + rowBytes);
+    const keel::usize needed = keel::as<keel::usize>(passH) * (1u + rowBytes);
     if (srcConsumed + needed > srcAvail) return false;
 
     keel::Array<keel::u8> prevRow(rowBytes, 0u);
@@ -442,27 +442,27 @@ bool UnfilterAndBlitPass(
             case 1u:
                 for (keel::usize i = 0u; i < rowBytes; ++i) {
                     const keel::u8 a = (i >= bpp) ? curRow[i - bpp] : 0u;
-                    curRow[i] = static_cast<keel::u8>(rawRow[i] + a);
+                    curRow[i] = keel::as<keel::u8>(rawRow[i] + a);
                 }
                 break;
             case 2u:
                 for (keel::usize i = 0u; i < rowBytes; ++i) {
-                    curRow[i] = static_cast<keel::u8>(rawRow[i] + prevRow[i]);
+                    curRow[i] = keel::as<keel::u8>(rawRow[i] + prevRow[i]);
                 }
                 break;
             case 3u:
                 for (keel::usize i = 0u; i < rowBytes; ++i) {
                     const keel::u32 a = (i >= bpp) ? curRow[i - bpp] : 0u;
                     const keel::u32 b = prevRow[i];
-                    curRow[i] = static_cast<keel::u8>(rawRow[i] + ((a + b) >> 1));
+                    curRow[i] = keel::as<keel::u8>(rawRow[i] + ((a + b) >> 1));
                 }
                 break;
             case 4u:
                 for (keel::usize i = 0u; i < rowBytes; ++i) {
-                    const keel::i32 a = (i >= bpp) ? static_cast<keel::i32>(curRow[i - bpp]) : 0;
-                    const keel::i32 b = static_cast<keel::i32>(prevRow[i]);
-                    const keel::i32 c = (i >= bpp) ? static_cast<keel::i32>(prevRow[i - bpp]) : 0;
-                    curRow[i] = static_cast<keel::u8>(rawRow[i] + PaethPredictor(a, b, c));
+                    const keel::i32 a = (i >= bpp) ? keel::as<keel::i32>(curRow[i - bpp]) : 0;
+                    const keel::i32 b = keel::as<keel::i32>(prevRow[i]);
+                    const keel::i32 c = (i >= bpp) ? keel::as<keel::i32>(prevRow[i - bpp]) : 0;
+                    curRow[i] = keel::as<keel::u8>(rawRow[i] + PaethPredictor(a, b, c));
                 }
                 break;
             default:
@@ -470,7 +470,7 @@ bool UnfilterAndBlitPass(
         }
 
         const keel::u32 dstY = yOffset + py * yStep;
-        keel::u32* dstRow = dstRgba.data() + static_cast<keel::usize>(dstY) * meta.width;
+        keel::u32* dstRow = dstRgba.data() + keel::as<keel::usize>(dstY) * meta.width;
 
         for (keel::u32 px = 0u; px < passW; ++px) {
             const keel::u32 dstX = xOffset + px * xStep;
@@ -481,13 +481,13 @@ bool UnfilterAndBlitPass(
 
             if (meta.colorType == 6u) {
                 if (meta.bitDepth == 8u) {
-                    const keel::usize off = static_cast<keel::usize>(px) * 4u;
+                    const keel::usize off = keel::as<keel::usize>(px) * 4u;
                     r = curRow[off];
                     g = curRow[off + 1u];
                     b = curRow[off + 2u];
                     a = curRow[off + 3u];
                 } else {
-                    const keel::usize off = static_cast<keel::usize>(px) * 8u;
+                    const keel::usize off = keel::as<keel::usize>(px) * 8u;
                     r = curRow[off];
                     g = curRow[off + 2u];
                     b = curRow[off + 4u];
@@ -495,7 +495,7 @@ bool UnfilterAndBlitPass(
                 }
             } else if (meta.colorType == 2u) {
                 if (meta.bitDepth == 8u) {
-                    const keel::usize off = static_cast<keel::usize>(px) * 3u;
+                    const keel::usize off = keel::as<keel::usize>(px) * 3u;
                     r = curRow[off];
                     g = curRow[off + 1u];
                     b = curRow[off + 2u];
@@ -503,13 +503,13 @@ bool UnfilterAndBlitPass(
                         a = 0u;
                     }
                 } else {
-                    const keel::usize off = static_cast<keel::usize>(px) * 6u;
+                    const keel::usize off = keel::as<keel::usize>(px) * 6u;
                     const keel::u16 r16 = ReadBe16(&curRow[off]);
                     const keel::u16 g16 = ReadBe16(&curRow[off + 2u]);
                     const keel::u16 b16 = ReadBe16(&curRow[off + 4u]);
-                    r = static_cast<keel::u8>(r16 >> 8);
-                    g = static_cast<keel::u8>(g16 >> 8);
-                    b = static_cast<keel::u8>(b16 >> 8);
+                    r = keel::as<keel::u8>(r16 >> 8);
+                    g = keel::as<keel::u8>(g16 >> 8);
+                    b = keel::as<keel::u8>(b16 >> 8);
                     if (meta.hasTrnsColor && r16 == meta.trnsR && g16 == meta.trnsG && b16 == meta.trnsB) {
                         a = 0u;
                     }
@@ -535,18 +535,18 @@ bool UnfilterAndBlitPass(
                 }
             } else if (meta.colorType == 4u) {
                 if (meta.bitDepth == 8u) {
-                    const keel::usize off = static_cast<keel::usize>(px) * 2u;
+                    const keel::usize off = keel::as<keel::usize>(px) * 2u;
                     r = g = b = curRow[off];
                     a = curRow[off + 1u];
                 } else {
-                    const keel::usize off = static_cast<keel::usize>(px) * 4u;
+                    const keel::usize off = keel::as<keel::usize>(px) * 4u;
                     r = g = b = curRow[off];
                     a = curRow[off + 2u];
                 }
             } else if (meta.colorType == 0u) {
                 if (meta.bitDepth == 16u) {
-                    const keel::u16 gv = ReadBe16(&curRow[static_cast<keel::usize>(px) * 2u]);
-                    r = g = b = static_cast<keel::u8>(gv >> 8);
+                    const keel::u16 gv = ReadBe16(&curRow[keel::as<keel::usize>(px) * 2u]);
+                    r = g = b = keel::as<keel::u8>(gv >> 8);
                     if (meta.hasTrnsColor && gv == meta.trnsGray) a = 0u;
                 } else if (meta.bitDepth == 8u) {
                     const keel::u8 gv = curRow[px];
@@ -626,7 +626,7 @@ bool DecodePngFromMemory(
             return false;
         }
         const keel::u8* chunkData = encodedBytes.data() + pos;
-        pos += static_cast<keel::usize>(chunkLen) + 4u; // skip data + CRC
+        pos += keel::as<keel::usize>(chunkLen) + 4u; // skip data + CRC
 
         if (keel::mem_cmp(chunkType, "IHDR", 4u) == 0) {
             if (chunkLen != 13u || haveIhdr) return false;
@@ -696,7 +696,7 @@ bool DecodePngFromMemory(
     keel::usize expectedRawBytes = 0u;
     if (interlace == 0u) {
         const keel::usize rowBytes = RowByteCount(meta.width, meta.channels, meta.bitDepth);
-        if (!keel::checked_mul(static_cast<keel::usize>(meta.height), 1u + rowBytes, expectedRawBytes)) {
+        if (!keel::checked_mul(keel::as<keel::usize>(meta.height), 1u + rowBytes, expectedRawBytes)) {
             return false;
         }
     } else {
@@ -706,7 +706,7 @@ bool DecodePngFromMemory(
             if (pw == 0u || ph == 0u) continue;
             const keel::usize rowBytes = RowByteCount(pw, meta.channels, meta.bitDepth);
             keel::usize passBytes = 0u;
-            if (!keel::checked_mul(static_cast<keel::usize>(ph), 1u + rowBytes, passBytes)) {
+            if (!keel::checked_mul(keel::as<keel::usize>(ph), 1u + rowBytes, passBytes)) {
                 return false;
             }
             expectedRawBytes += passBytes;
@@ -719,7 +719,7 @@ bool DecodePngFromMemory(
     }
 
     keel::usize totalPx = 0u;
-    if (!keel::checked_mul(static_cast<keel::usize>(meta.width), static_cast<keel::usize>(meta.height), totalPx)) {
+    if (!keel::checked_mul(keel::as<keel::usize>(meta.width), keel::as<keel::usize>(meta.height), totalPx)) {
         return false;
     }
     outRgbaPixels.resize(totalPx, 0u);

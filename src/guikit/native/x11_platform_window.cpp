@@ -329,17 +329,17 @@ void* EglProcLoaderThunk(const char* procName) {
     }
 }
 
-[[nodiscard]] float ParseXftDpiScale(const char* xrm) noexcept {
+[[nodiscard]] keel::f32 ParseXftDpiScale(const char* xrm) noexcept {
     if (!xrm) return 1.0f;
     const keel::StringRef s(xrm);
     const keel::usize pos = s.find("Xft.dpi:");
     if (pos == keel::StringRef::npos) return 1.0f;
     keel::usize i = pos + 8u;
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-    float val = 0.0f;
+    keel::f32 val = 0.0f;
     bool hasDigit = false;
     while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
-        val = val * 10.0f + static_cast<float>(s[i] - '0');
+        val = val * 10.0f + keel::as<keel::f32>(s[i] - '0');
         hasDigit = true;
         ++i;
     }
@@ -367,8 +367,8 @@ struct X11PlatformWindow::Impl {
     keel::i32 wakeFd{-1};
     keel::i32 width{1380};
     keel::i32 height{800};
-    float dpiScale{1.0f};
-    float pixelsPerMm{96.0f / 25.4f};
+    keel::f32 dpiScale{1.0f};
+    keel::f32 pixelsPerMm{96.0f / 25.4f};
     bool vsync{true};
     bool minimized{false};
     bool closeRequested{false};
@@ -542,7 +542,7 @@ struct X11PlatformWindow::Impl {
         }
         switch (ev.type) {
             case ClientMessage:
-                if (static_cast<Atom>(ev.xclient.data.l[0]) == wmDeleteWindow) {
+                if (keel::as<Atom>(ev.xclient.data.l[0]) == wmDeleteWindow) {
                     if (!callbacks.onCloseRequested || callbacks.onCloseRequested()) {
                         closeRequested = true;
                     }
@@ -580,11 +580,11 @@ struct X11PlatformWindow::Impl {
                 break;
 
             case MotionNotify:
-                ui.OnMouseMove({static_cast<float>(ev.xmotion.x), static_cast<float>(ev.xmotion.y)});
+                ui.OnMouseMove({keel::as<keel::f32>(ev.xmotion.x), keel::as<keel::f32>(ev.xmotion.y)});
                 break;
 
             case ButtonPress:
-                ui.OnMouseMove({static_cast<float>(ev.xbutton.x), static_cast<float>(ev.xbutton.y)});
+                ui.OnMouseMove({keel::as<keel::f32>(ev.xbutton.x), keel::as<keel::f32>(ev.xbutton.y)});
                 if (ev.xbutton.button == 1) ui.OnMouseDown(1);
                 else if (ev.xbutton.button == 2) ui.OnMouseDown(2);
                 else if (ev.xbutton.button == 3) ui.OnMouseDown(3);
@@ -595,7 +595,7 @@ struct X11PlatformWindow::Impl {
                 break;
 
             case ButtonRelease:
-                ui.OnMouseMove({static_cast<float>(ev.xbutton.x), static_cast<float>(ev.xbutton.y)});
+                ui.OnMouseMove({keel::as<keel::f32>(ev.xbutton.x), keel::as<keel::f32>(ev.xbutton.y)});
                 if (ev.xbutton.button == 1) ui.OnMouseUp(1);
                 else if (ev.xbutton.button == 2) ui.OnMouseUp(2);
                 else if (ev.xbutton.button == 3) ui.OnMouseUp(3);
@@ -620,15 +620,15 @@ struct X11PlatformWindow::Impl {
                     if (xic && x11.Utf8LookupString) {
                         Status status = 0;
                         KeySym ignored = NoSymbol;
-                        len = x11.Utf8LookupString(xic, &ev.xkey, utf8Buf, static_cast<keel::i32>(sizeof(utf8Buf) - 1), &ignored, &status);
+                        len = x11.Utf8LookupString(xic, &ev.xkey, utf8Buf, keel::as<keel::i32>(sizeof(utf8Buf) - 1), &ignored, &status);
                     } else {
                         KeySym ignored = NoSymbol;
-                        len = x11.LookupString(&ev.xkey, utf8Buf, static_cast<keel::i32>(sizeof(utf8Buf) - 1), &ignored, nullptr);
+                        len = x11.LookupString(&ev.xkey, utf8Buf, keel::as<keel::i32>(sizeof(utf8Buf) - 1), &ignored, nullptr);
                     }
                     if (len > 0) {
-                        const auto first = static_cast<keel::u8>(utf8Buf[0]);
+                        const auto first = keel::as<keel::u8>(utf8Buf[0]);
                         if (first >= 0x20u && first != 0x7Fu) {
-                            ui.OnTextInput(keel::StringRef(utf8Buf, static_cast<keel::usize>(len)));
+                            ui.OnTextInput(keel::StringRef(utf8Buf, keel::as<keel::usize>(len)));
                         }
                     }
                 }
@@ -694,7 +694,7 @@ bool X11PlatformWindow::Create(
         const keel::i32 pxW = m_impl->x11.DisplayWidth(m_impl->display, m_impl->screen);
         const keel::i32 mmW = m_impl->x11.DisplayWidthMM(m_impl->display, m_impl->screen);
         if (pxW > 320 && mmW > 50) {
-            m_impl->pixelsPerMm = static_cast<float>(pxW) / static_cast<float>(mmW);
+            m_impl->pixelsPerMm = keel::as<keel::f32>(pxW) / keel::as<keel::f32>(mmW);
         } else {
             m_impl->pixelsPerMm = (96.0f * m_impl->dpiScale) / 25.4f;
         }
@@ -706,8 +706,8 @@ bool X11PlatformWindow::Create(
         root,
         0,
         0,
-        static_cast<keel::u32>(m_impl->width),
-        static_cast<keel::u32>(m_impl->height),
+        keel::as<keel::u32>(m_impl->width),
+        keel::as<keel::u32>(m_impl->height),
         0,
         0,
         0
@@ -742,7 +742,7 @@ bool X11PlatformWindow::Create(
                 8,
                 PropModeReplace,
                 reinterpret_cast<const keel::u8*>(titleStr.c_str()),
-                static_cast<keel::i32>(titleStr.size())
+                keel::as<keel::i32>(titleStr.size())
             );
         }
     }
@@ -891,11 +891,11 @@ keel::i32 X11PlatformWindow::GetFramebufferHeight() const noexcept {
     return m_impl ? m_impl->height : 0;
 }
 
-float X11PlatformWindow::GetDpiScale() const noexcept {
+keel::f32 X11PlatformWindow::GetDpiScale() const noexcept {
     return m_impl ? m_impl->dpiScale : 1.0f;
 }
 
-float X11PlatformWindow::GetDisplayPixelsPerMm() const noexcept {
+keel::f32 X11PlatformWindow::GetDisplayPixelsPerMm() const noexcept {
     return m_impl ? m_impl->pixelsPerMm : (96.0f / 25.4f);
 }
 
@@ -924,7 +924,7 @@ void X11PlatformWindow::SetCursor(CursorType cursor) noexcept {
         return;
     }
     m_impl->activeCursor = cursor;
-    const auto idx = static_cast<keel::usize>(cursor);
+    const auto idx = keel::as<keel::usize>(cursor);
     if (idx >= 9u) return;
 
     if (cursor == CursorType::Default) {
@@ -971,8 +971,8 @@ void X11PlatformWindow::SwapBuffers() noexcept {}
 GlProcAddressFn X11PlatformWindow::GetGlProcAddressFn() const noexcept { return nullptr; }
 keel::i32 X11PlatformWindow::GetFramebufferWidth() const noexcept { return 0; }
 keel::i32 X11PlatformWindow::GetFramebufferHeight() const noexcept { return 0; }
-float X11PlatformWindow::GetDpiScale() const noexcept { return 1.0f; }
-float X11PlatformWindow::GetDisplayPixelsPerMm() const noexcept { return 96.0f / 25.4f; }
+keel::f32 X11PlatformWindow::GetDpiScale() const noexcept { return 1.0f; }
+keel::f32 X11PlatformWindow::GetDisplayPixelsPerMm() const noexcept { return 96.0f / 25.4f; }
 bool X11PlatformWindow::IsMinimized() const noexcept { return false; }
 bool X11PlatformWindow::IsLiveResizeFrame() const noexcept { return false; }
 bool X11PlatformWindow::IsVsyncEnabled() const noexcept { return true; }

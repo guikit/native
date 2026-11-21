@@ -93,7 +93,7 @@ int main() {
             CHECK(keel::abs(iconSize.x - 1024.0f) < 0.5f && keel::abs(iconSize.y - 1024.0f) < 0.5f);
 
             keel::Array<keel::u32> samplePixels(16u * 16u, 0xFF38BDF8u);
-            keel::Array<float> gpuField(32u * 64u, 0.5f);
+            keel::Array<keel::f32> gpuField(32u * 64u, 0.5f);
             keel::Array<keel::u32> gpuLut(256u, 0xFF22D3EEu);
 
             static constexpr keel::StringRef kTestPassFrag = R"(
@@ -141,8 +141,8 @@ void main() {
                 pass.bgColor = Color(8, 12, 20, 255);
                 pass.dataField = {gpuField, 32u, 64u};
                 pass.fullGeneration = 1u;
-                pass.sliceGeneration = static_cast<keel::u64>(f + 1);
-                pass.headRow = static_cast<keel::u32>(f);
+                pass.sliceGeneration = keel::as<keel::u64>(f + 1);
+                pass.headRow = keel::as<keel::u32>(f);
                 pass.dataNormOffset = 0.0f;
                 pass.dataNormScale = 1.0f;
                 pass.colormapId = 0u;
