@@ -28,6 +28,7 @@ static constexpr GLenum kGlFalse = 0u;
 static constexpr GLenum kGlTrue = 1u;
 
 static constexpr GLbitfield kGlColorBufferBit = 0x00004000u;
+static constexpr GLbitfield kGlStencilBufferBit = 0x00000400u;
 
 static constexpr GLenum kGlTriangles = 0x0004u;
 static constexpr GLenum kGlUnsignedByte = 0x1401u;
@@ -36,15 +37,33 @@ static constexpr GLenum kGlFloat = 0x1406u;
 static constexpr GLenum kGlBlend = 0x0BE2u;
 static constexpr GLenum kGlScissorTest = 0x0C11u;
 static constexpr GLenum kGlDepthTest = 0x0B71u;
+static constexpr GLenum kGlStencilTest = 0x0B90u;
 static constexpr GLenum kGlCullFace = 0x0B44u;
+static constexpr GLenum kGlMultisample = 0x809Du;
 static constexpr GLenum kGlUnpackAlignment = 0x0CF5u;
 
+static constexpr GLenum kGlZero = 0u;
 static constexpr GLenum kGlOne = 1u;
+static constexpr GLenum kGlNotEqual = 0x0205u;
+static constexpr GLenum kGlAlways = 0x0207u;
+static constexpr GLenum kGlFront = 0x0404u;
+static constexpr GLenum kGlBack = 0x0405u;
+static constexpr GLenum kGlKeep = 0x1E00u;
+static constexpr GLenum kGlInvert = 0x150Au;
+static constexpr GLenum kGlIncrWrap = 0x8507u;
+static constexpr GLenum kGlDecrWrap = 0x8508u;
+
 static constexpr GLenum kGlOneMinusSrcColor = 0x0301u;
 static constexpr GLenum kGlSrcAlpha = 0x0302u;
 static constexpr GLenum kGlOneMinusSrcAlpha = 0x0303u;
 static constexpr GLenum kGlConstantColor = 0x8001u;
 static constexpr GLenum kGlFuncAdd = 0x8006u;
+
+static constexpr GLenum kGlFramebuffer = 0x8D40u;
+static constexpr GLenum kGlStencil = 0x1802u;
+static constexpr GLenum kGlFramebufferAttachmentStencilSize = 0x8217u;
+static constexpr GLenum kGlStencilBits = 0x0D57u;
+static constexpr GLenum kGlSamples = 0x80A9u;
 
 static constexpr GLenum kGlTexture2D = 0x0DE1u;
 static constexpr GLenum kGlTexture0 = 0x84C0u;
@@ -81,12 +100,20 @@ struct GlEs3Api {
 
     using PfnGetString = const GLubyte*(GUIKIT_GL_APIENTRY*)(GLenum name);
     using PfnGetError = GLenum(GUIKIT_GL_APIENTRY*)();
+    using PfnGetIntegerv = void(GUIKIT_GL_APIENTRY*)(GLenum pname, GLint* data);
+    using PfnGetFramebufferAttachmentParameteriv = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLenum attachment, GLenum pname, GLint* params);
     using PfnViewport = void(GUIKIT_GL_APIENTRY*)(GLint x, GLint y, GLsizei width, GLsizei height);
     using PfnScissor = void(GUIKIT_GL_APIENTRY*)(GLint x, GLint y, GLsizei width, GLsizei height);
     using PfnEnable = void(GUIKIT_GL_APIENTRY*)(GLenum cap);
     using PfnDisable = void(GUIKIT_GL_APIENTRY*)(GLenum cap);
     using PfnClearColor = void(GUIKIT_GL_APIENTRY*)(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
+    using PfnClearStencil = void(GUIKIT_GL_APIENTRY*)(GLint s);
     using PfnClear = void(GUIKIT_GL_APIENTRY*)(GLbitfield mask);
+    using PfnColorMask = void(GUIKIT_GL_APIENTRY*)(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+    using PfnStencilFunc = void(GUIKIT_GL_APIENTRY*)(GLenum func, GLint ref, GLuint mask);
+    using PfnStencilOp = void(GUIKIT_GL_APIENTRY*)(GLenum sfail, GLenum dpfail, GLenum dppass);
+    using PfnStencilOpSeparate = void(GUIKIT_GL_APIENTRY*)(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass);
+    using PfnStencilMask = void(GUIKIT_GL_APIENTRY*)(GLuint mask);
     using PfnBlendFuncSeparate = void(GUIKIT_GL_APIENTRY*)(GLenum sRGB, GLenum dRGB, GLenum sAlpha, GLenum dAlpha);
     using PfnBlendColor = void(GUIKIT_GL_APIENTRY*)(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
     using PfnBlendEquation = void(GUIKIT_GL_APIENTRY*)(GLenum mode);
@@ -142,12 +169,20 @@ struct GlEs3Api {
 
     PfnGetString GetString{nullptr};
     PfnGetError GetError{nullptr};
+    PfnGetIntegerv GetIntegerv{nullptr};
+    PfnGetFramebufferAttachmentParameteriv GetFramebufferAttachmentParameteriv{nullptr};
     PfnViewport Viewport{nullptr};
     PfnScissor Scissor{nullptr};
     PfnEnable Enable{nullptr};
     PfnDisable Disable{nullptr};
     PfnClearColor ClearColor{nullptr};
+    PfnClearStencil ClearStencil{nullptr};
     PfnClear Clear{nullptr};
+    PfnColorMask ColorMask{nullptr};
+    PfnStencilFunc StencilFunc{nullptr};
+    PfnStencilOp StencilOp{nullptr};
+    PfnStencilOpSeparate StencilOpSeparate{nullptr};
+    PfnStencilMask StencilMask{nullptr};
     PfnBlendFuncSeparate BlendFuncSeparate{nullptr};
     PfnBlendColor BlendColor{nullptr};
     PfnBlendEquation BlendEquation{nullptr};
@@ -233,12 +268,20 @@ struct GlEs3Api {
         bool ok = true;
         ok = LoadFn(procLoader, "glGetString", GetString) && ok;
         ok = LoadFn(procLoader, "glGetError", GetError) && ok;
+        (void)LoadFn(procLoader, "glGetIntegerv", GetIntegerv);
+        (void)LoadFn(procLoader, "glGetFramebufferAttachmentParameteriv", GetFramebufferAttachmentParameteriv);
         ok = LoadFn(procLoader, "glViewport", Viewport) && ok;
         ok = LoadFn(procLoader, "glScissor", Scissor) && ok;
         ok = LoadFn(procLoader, "glEnable", Enable) && ok;
         ok = LoadFn(procLoader, "glDisable", Disable) && ok;
         ok = LoadFn(procLoader, "glClearColor", ClearColor) && ok;
+        (void)LoadFn(procLoader, "glClearStencil", ClearStencil);
         ok = LoadFn(procLoader, "glClear", Clear) && ok;
+        (void)LoadFn(procLoader, "glColorMask", ColorMask);
+        (void)LoadFn(procLoader, "glStencilFunc", StencilFunc);
+        (void)LoadFn(procLoader, "glStencilOp", StencilOp);
+        (void)LoadFn(procLoader, "glStencilOpSeparate", StencilOpSeparate);
+        (void)LoadFn(procLoader, "glStencilMask", StencilMask);
         ok = LoadFn(procLoader, "glBlendFuncSeparate", BlendFuncSeparate) && ok;
         ok = LoadFn(procLoader, "glBlendColor", BlendColor) && ok;
         ok = LoadFn(procLoader, "glBlendEquation", BlendEquation) && ok;

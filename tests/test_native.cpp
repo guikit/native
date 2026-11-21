@@ -96,6 +96,12 @@ int main() {
             keel::println("     GL Version:  {}", glCanvas.GetGlVersionString());
             keel::println("     GL Renderer: {}", glCanvas.GetGlRendererString());
             keel::println("     Text Engine: {}", glCanvas.GetTextEngineName());
+            keel::println("     Surface:     MSAA {}x, Stencil {} bits", glCanvas.GetMsaaSamples(), glCanvas.GetStencilBits());
+            CHECK(glCanvas.GetStencilBits() >= 8);
+
+            // Verify system clipboard round-trip (owned by this window)
+            ui.SetClipboardText("GuiKit Native UTF-8 ✓");
+            CHECK(ui.GetClipboardText() == "GuiKit Native UTF-8 ✓");
 
             // Measure text & render full immediate-mode UI frame + custom path + pixels + image + GPU shader pass
             const Vec2 tm = glCanvas.MeasureText("Hello ES3", 16.0f);
@@ -133,6 +139,13 @@ void main() {
             poly.CubicTo({70.0f, 35.0f}, {70.0f, 55.0f}, {50.0f, 65.0f});
             poly.LineTo({20.0f, 60.0f});
             poly.Close();
+
+            // Concentric EvenOdd polygon with interior island hole (exercises GPU Stencil-then-Cover)
+            VectorPath donut;
+            const Vec2 outerRing[4] = {{80.0f, 20.0f}, {140.0f, 20.0f}, {140.0f, 80.0f}, {80.0f, 80.0f}};
+            const Vec2 innerHole[4] = {{95.0f, 35.0f}, {125.0f, 35.0f}, {125.0f, 65.0f}, {95.0f, 65.0f}};
+            donut.AddClosedRing({outerRing, 4u});
+            donut.AddClosedRing({innerHole, 4u});
 
             ui.SetDirtyRectEnabled(false);
             for (keel::i32 f = 0; f < 2; ++f) {
@@ -174,6 +187,19 @@ void main() {
                     .dashOnPx = 6.0f,
                     .dashOffPx = 4.0f
                 });
+                glCanvas.DrawPath(donut, PathPaint{
+                    .fillColor = Color(34, 197, 94, 220),
+                    .strokeColor = Color(255, 255, 255, 255),
+                    .strokeWidthPx = 1.5f,
+                    .fillRule = FillRule::EvenOdd,
+                    .renderFill = true,
+                    .renderStroke = true
+                });
+                // Analytical GPU SDF arcs (270 deg rounded knob arc, flat-cap arc, full 360 deg ring) + Gaussian shadow
+                glCanvas.DrawShadow(Rect(210.0f, 16.0f, 170.0f, 68.0f), 10.0f, 16.0f, {0.0f, 5.0f}, Color(0, 0, 0, 110));
+                glCanvas.DrawArc({240.0f, 50.0f}, 24.0f, -1.25f * keel::kPiF, 0.25f * keel::kPiF, Color(59, 130, 246, 255), 4.0f, true);
+                glCanvas.DrawArc({300.0f, 50.0f}, 22.0f, -0.75f * keel::kPiF, 0.0f, Color(245, 158, 11, 220), 3.0f, false);
+                glCanvas.DrawArc({355.0f, 50.0f}, 18.0f, 0.0f, keel::kTauF, Color(148, 163, 184, 200), 2.0f, false);
                 glCanvas.DrawTextStyled("Vertical -90", {20.0f, 200.0f}, 14.0f, Color(255, 255, 255), FontStyle::Bold, -90.0f);
 
                 // Verify production text rendering settings (LCD RGB/BGR, Grayscale, contrast, stemDarkening, gamma)

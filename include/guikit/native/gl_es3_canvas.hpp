@@ -28,6 +28,8 @@ public:
 
     [[nodiscard]] keel::StringRef GetGlVersionString() const noexcept;
     [[nodiscard]] keel::StringRef GetGlRendererString() const noexcept;
+    [[nodiscard]] keel::i32 GetMsaaSamples() const noexcept;
+    [[nodiscard]] keel::i32 GetStencilBits() const noexcept;
 
     [[nodiscard]] bool UsesCpuFramebuffer() const noexcept override { return false; }
 
@@ -62,6 +64,14 @@ public:
         Color stroke = Color(0, 0, 0, 0),
         keel::f32 strokeWidth = 0.0f
     ) override;
+    void DrawShadow(
+        Rect rect,
+        keel::f32 cornerRadius,
+        keel::f32 blurRadius,
+        Vec2 offset = {0.0f, 4.0f},
+        Color color = Color(0, 0, 0, 96),
+        keel::f32 spread = 0.0f
+    ) override;
 
     Vec2 MeasureText(keel::StringRef text, keel::f32 fontSize) override;
     Vec2 MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, FontStyle style) override;
@@ -95,6 +105,15 @@ public:
     ) override;
 
     void DrawLine(Vec2 p1, Vec2 p2, Color color, keel::f32 strokeWidth = 1.0f) override;
+    void DrawArc(
+        Vec2 center,
+        keel::f32 radius,
+        keel::f32 startAngleRad,
+        keel::f32 endAngleRad,
+        Color color,
+        keel::f32 strokeWidth = 1.5f,
+        bool roundCaps = true
+    ) override;
     void DrawTriangle(
         Vec2 p1,
         Vec2 p2,

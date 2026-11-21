@@ -1,11 +1,15 @@
 #include "guikit/native/x11_platform_window.hpp"
 
+#include "guikit/backend/vector_backend.hpp"
 #include "guikit/context.hpp"
+#include "guikit/core/assets.hpp"
+#include "keel/array.h"
 #include "keel/dynlib.h"
 #include "keel/env.h"
 #include "keel/format.h"
 #include "keel/math.h"
 #include "keel/string.h"
+#include "keel/time.h"
 
 #if defined(__linux__) && !defined(__ANDROID__) && __has_include(<X11/Xlib.h>)
 #define GUIKIT_NATIVE_COMPILE_X11 1
@@ -16,7 +20,12 @@
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
-static constexpr unsigned long kX11None = None; // keel-lint: ignore
+using X11Card = unsigned long; // keel-lint: ignore
+using X11Long = long; // keel-lint: ignore
+static constexpr X11Card kX11None = None;
+static constexpr Atom kX11XaAtom = 4u;
+static constexpr Atom kX11XaCardinal = 6u;
+static constexpr Atom kX11XaString = 31u;
 #undef None
 #undef DestroyAll
 #undef DefaultScreen
@@ -52,6 +61,9 @@ static constexpr EGLint kEglRedSize = 0x3024;
 static constexpr EGLint kEglGreenSize = 0x3023;
 static constexpr EGLint kEglBlueSize = 0x3022;
 static constexpr EGLint kEglAlphaSize = 0x3021;
+static constexpr EGLint kEglStencilSize = 0x3026;
+static constexpr EGLint kEglSamples = 0x3031;
+static constexpr EGLint kEglSampleBuffers = 0x3032;
 static constexpr EGLint kEglSurfaceType = 0x3033;
 static constexpr EGLint kEglWindowBit = 0x0004;
 static constexpr EGLint kEglRenderableType = 0x3040;
@@ -100,6 +112,13 @@ struct X11Api {
     using PfnXDisplayWidth = keel::i32(*)(Display*, keel::i32);
     using PfnXDisplayWidthMM = keel::i32(*)(Display*, keel::i32);
     using PfnXResourceManagerString = char*(*)(Display*);
+    using PfnXSetSelectionOwner = keel::i32(*)(Display*, Atom, Window, Time);
+    using PfnXGetSelectionOwner = Window(*)(Display*, Atom);
+    using PfnXConvertSelection = keel::i32(*)(Display*, Atom, Atom, Atom, Window, Time);
+    using PfnXGetWindowProperty = keel::i32(*)(Display*, Window, Atom, X11Long, X11Long, Bool, Atom, Atom*, keel::i32*, X11Card*, X11Card*, keel::u8**);
+    using PfnXDeleteProperty = keel::i32(*)(Display*, Window, Atom);
+    using PfnXSendEvent = Status(*)(Display*, Window, Bool, X11Long, XEvent*);
+    using PfnXCheckTypedWindowEvent = Bool(*)(Display*, Window, keel::i32, XEvent*);
 
     PfnXOpenDisplay OpenDisplay{nullptr};
     PfnXCloseDisplay CloseDisplay{nullptr};
@@ -135,6 +154,13 @@ struct X11Api {
     PfnXDisplayWidth DisplayWidth{nullptr};
     PfnXDisplayWidthMM DisplayWidthMM{nullptr};
     PfnXResourceManagerString ResourceManagerString{nullptr};
+    PfnXSetSelectionOwner SetSelectionOwner{nullptr};
+    PfnXGetSelectionOwner GetSelectionOwner{nullptr};
+    PfnXConvertSelection ConvertSelection{nullptr};
+    PfnXGetWindowProperty GetWindowProperty{nullptr};
+    PfnXDeleteProperty DeleteProperty{nullptr};
+    PfnXSendEvent SendEvent{nullptr};
+    PfnXCheckTypedWindowEvent CheckTypedWindowEvent{nullptr};
 
     bool Load() noexcept {
         if (lib.is_open()) return true;
@@ -177,6 +203,13 @@ struct X11Api {
         DisplayWidth = lib.symbol<PfnXDisplayWidth>("XDisplayWidth");
         DisplayWidthMM = lib.symbol<PfnXDisplayWidthMM>("XDisplayWidthMM");
         ResourceManagerString = lib.symbol<PfnXResourceManagerString>("XResourceManagerString");
+        SetSelectionOwner = lib.symbol<PfnXSetSelectionOwner>("XSetSelectionOwner");
+        GetSelectionOwner = lib.symbol<PfnXGetSelectionOwner>("XGetSelectionOwner");
+        ConvertSelection = lib.symbol<PfnXConvertSelection>("XConvertSelection");
+        GetWindowProperty = lib.symbol<PfnXGetWindowProperty>("XGetWindowProperty");
+        DeleteProperty = lib.symbol<PfnXDeleteProperty>("XDeleteProperty");
+        SendEvent = lib.symbol<PfnXSendEvent>("XSendEvent");
+        CheckTypedWindowEvent = lib.symbol<PfnXCheckTypedWindowEvent>("XCheckTypedWindowEvent");
 
         return OpenDisplay && CloseDisplay && DefaultScreen && RootWindow &&
                CreateSimpleWindow && DestroyWindow && SelectInput && MapWindow &&
@@ -347,6 +380,55 @@ void* EglProcLoaderThunk(const char* procName) {
     return keel::clamp(val / 96.0f, 0.75f, 4.0f);
 }
 
+[[nodiscard]] KeyModifiers ExtractX11Modifiers(keel::u32 state) noexcept {
+    KeyModifiers mods{};
+    mods.shift = (state & ShiftMask) != 0u;
+    mods.ctrl = (state & ControlMask) != 0u;
+    mods.alt = (state & Mod1Mask) != 0u;
+    return mods;
+}
+
+void AppendDownsampledNetWmIcon(
+    keel::Array<X11Card>& outData,
+    const keel::u32* srcRgba,
+    keel::u32 srcW,
+    keel::u32 srcH,
+    keel::u32 dstDim
+) {
+    if (!srcRgba || srcW == 0u || srcH == 0u || dstDim == 0u) return;
+    outData.push_back(keel::as<X11Card>(dstDim));
+    outData.push_back(keel::as<X11Card>(dstDim));
+
+    for (keel::u32 y = 0u; y < dstDim; ++y) {
+        const keel::u32 sy0 = (y * srcH) / dstDim;
+        const keel::u32 sy1 = keel::max(sy0 + 1u, ((y + 1u) * srcH) / dstDim);
+        for (keel::u32 x = 0u; x < dstDim; ++x) {
+            const keel::u32 sx0 = (x * srcW) / dstDim;
+            const keel::u32 sx1 = keel::max(sx0 + 1u, ((x + 1u) * srcW) / dstDim);
+            keel::u64 sumR = 0u, sumG = 0u, sumB = 0u, sumA = 0u, cnt = 0u;
+            for (keel::u32 sy = sy0; sy < sy1 && sy < srcH; ++sy) {
+                const keel::u32* row = srcRgba + keel::as<keel::usize>(sy) * srcW;
+                for (keel::u32 sx = sx0; sx < sx1 && sx < srcW; ++sx) {
+                    const keel::u32 p = row[sx];
+                    sumR += (p & 0xFFu);
+                    sumG += ((p >> 8) & 0xFFu);
+                    sumB += ((p >> 16) & 0xFFu);
+                    sumA += ((p >> 24) & 0xFFu);
+                    ++cnt;
+                }
+            }
+            if (cnt == 0u) cnt = 1u;
+            const keel::u32 r = keel::as<keel::u32>(sumR / cnt);
+            const keel::u32 g = keel::as<keel::u32>(sumG / cnt);
+            const keel::u32 b = keel::as<keel::u32>(sumB / cnt);
+            const keel::u32 a = keel::as<keel::u32>(sumA / cnt);
+            // _NET_WM_ICON expects packed 0xAARRGGBB in each 32-bit CARDINAL element
+            const keel::u32 argb = (a << 24) | (r << 16) | (g << 8) | b;
+            outData.push_back(keel::as<X11Card>(argb));
+        }
+    }
+}
+
 } // namespace
 
 struct X11PlatformWindow::Impl {
@@ -357,6 +439,10 @@ struct X11PlatformWindow::Impl {
     keel::i32 screen{0};
     Window window{0};
     Atom wmDeleteWindow{0};
+    Atom atomClipboard{0};
+    Atom atomUtf8String{0};
+    Atom atomTargets{0};
+    Atom atomClipboardProp{0};
     XIM xim{nullptr};
     XIC xic{nullptr};
 
@@ -430,6 +516,46 @@ struct X11PlatformWindow::Impl {
         callbacks = {};
     }
 
+    bool ChooseEglConfig(EGLint renderableBit, EGLConfig& outCfg) noexcept {
+        struct Profile {
+            EGLint stencilBits;
+            EGLint sampleBuffers;
+            EGLint samples;
+        };
+        static constexpr Profile kProfiles[] = {
+            {8, 1, 4}, // 4x MSAA + 8-bit stencil (crispest vector anti-aliasing + EvenOdd holes)
+            {8, 1, 2}, // 2x MSAA + 8-bit stencil
+            {8, 0, 0}, // 8-bit stencil without MSAA
+            {0, 0, 0}  // Minimal RGBA8 fallback
+        };
+        for (const Profile& prof : kProfiles) {
+            EGLint attribs[24]{};
+            keel::usize idx = 0u;
+            attribs[idx++] = kEglSurfaceType;    attribs[idx++] = kEglWindowBit;
+            attribs[idx++] = kEglRenderableType; attribs[idx++] = renderableBit;
+            attribs[idx++] = kEglRedSize;        attribs[idx++] = 8;
+            attribs[idx++] = kEglGreenSize;      attribs[idx++] = 8;
+            attribs[idx++] = kEglBlueSize;       attribs[idx++] = 8;
+            attribs[idx++] = kEglAlphaSize;      attribs[idx++] = 8;
+            if (prof.stencilBits > 0) {
+                attribs[idx++] = kEglStencilSize; attribs[idx++] = prof.stencilBits;
+            }
+            if (prof.sampleBuffers > 0) {
+                attribs[idx++] = kEglSampleBuffers; attribs[idx++] = prof.sampleBuffers;
+                attribs[idx++] = kEglSamples;       attribs[idx++] = prof.samples;
+            }
+            attribs[idx++] = kEglNone;
+
+            EGLConfig cfg = nullptr;
+            EGLint numConfigs = 0;
+            if (egl.ChooseConfig(eglDisplay, attribs, &cfg, 1, &numConfigs) == kEglTrue && numConfigs > 0 && cfg) {
+                outCfg = cfg;
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool InitEgl(GraphicsApi requestedApi) noexcept {
         if (!egl.Load()) {
             keel::eprintln("[X11PlatformWindow] Failed to load libEGL.so.1");
@@ -457,33 +583,10 @@ struct X11PlatformWindow::Impl {
         const bool tryEs3First = (requestedApi != GraphicsApi::OpenGL3);
         bool boundEs = false;
         EGLConfig cfg = nullptr;
-        EGLint numConfigs = 0;
 
         if (tryEs3First && egl.BindAPI(kEglOpenGlEsApi) == kEglTrue) {
-            const EGLint attribsEs3[] = {
-                kEglSurfaceType, kEglWindowBit,
-                kEglRenderableType, kEglOpenGlEs3Bit,
-                kEglRedSize, 8,
-                kEglGreenSize, 8,
-                kEglBlueSize, 8,
-                kEglAlphaSize, 8,
-                kEglNone
-            };
-            if (egl.ChooseConfig(eglDisplay, attribsEs3, &cfg, 1, &numConfigs) == kEglTrue && numConfigs > 0) {
+            if (ChooseEglConfig(kEglOpenGlEs3Bit, cfg) || ChooseEglConfig(kEglOpenGlEs2Bit, cfg)) {
                 boundEs = true;
-            } else {
-                const EGLint attribsEs2[] = {
-                    kEglSurfaceType, kEglWindowBit,
-                    kEglRenderableType, kEglOpenGlEs2Bit,
-                    kEglRedSize, 8,
-                    kEglGreenSize, 8,
-                    kEglBlueSize, 8,
-                    kEglAlphaSize, 8,
-                    kEglNone
-                };
-                if (egl.ChooseConfig(eglDisplay, attribsEs2, &cfg, 1, &numConfigs) == kEglTrue && numConfigs > 0) {
-                    boundEs = true;
-                }
             }
         }
 
@@ -492,16 +595,7 @@ struct X11PlatformWindow::Impl {
                 keel::eprintln("[X11PlatformWindow] Failed to bind EGL OpenGL ES or Desktop OpenGL API");
                 return false;
             }
-            const EGLint attribsGl[] = {
-                kEglSurfaceType, kEglWindowBit,
-                kEglRenderableType, kEglOpenGlBit,
-                kEglRedSize, 8,
-                kEglGreenSize, 8,
-                kEglBlueSize, 8,
-                kEglAlphaSize, 8,
-                kEglNone
-            };
-            if (egl.ChooseConfig(eglDisplay, attribsGl, &cfg, 1, &numConfigs) == kEglFalse || numConfigs <= 0) {
+            if (!ChooseEglConfig(kEglOpenGlBit, cfg)) {
                 keel::eprintln("[X11PlatformWindow] eglChooseConfig() failed");
                 return false;
             }
@@ -534,6 +628,242 @@ struct X11PlatformWindow::Impl {
             (void)egl.SwapInterval(eglDisplay, vsync ? 1 : 0);
         }
         return true;
+    }
+
+    void SetSystemClipboard(keel::StringRef text) {
+        clipboardText = keel::String::from(text);
+        if (display && window != 0 && atomClipboard != kX11None && x11.SetSelectionOwner) {
+            (void)x11.SetSelectionOwner(display, atomClipboard, window, CurrentTime);
+            x11.Flush(display);
+        }
+    }
+
+    [[nodiscard]] keel::String GetSystemClipboard() {
+        if (!display || window == 0 || atomClipboard == kX11None ||
+            !x11.GetSelectionOwner || !x11.ConvertSelection ||
+            !x11.GetWindowProperty || !x11.CheckTypedWindowEvent || !x11.Free) {
+            return clipboardText.clone();
+        }
+
+        const Window owner = x11.GetSelectionOwner(display, atomClipboard);
+        if (owner == kX11None) {
+            return {};
+        }
+        if (owner == window) {
+            return clipboardText.clone();
+        }
+
+        auto requestTarget = [&](Atom targetAtom, keel::String& out) -> bool {
+            if (x11.DeleteProperty) {
+                (void)x11.DeleteProperty(display, window, atomClipboardProp);
+            }
+            (void)x11.ConvertSelection(display, atomClipboard, targetAtom, atomClipboardProp, window, CurrentTime);
+            x11.Flush(display);
+
+            const keel::u64 deadlineMs = keel::monotonic_ms() + 150u;
+            const keel::i32 x11Fd = x11.ConnectionNumber(display);
+            for (;;) {
+                XEvent ev{};
+                if (x11.CheckTypedWindowEvent(display, window, SelectionNotify, &ev)) {
+                    if (ev.xselection.property == kX11None) {
+                        return false;
+                    }
+                    Atom actualType = kX11None;
+                    keel::i32 actualFormat = 0;
+                    X11Card numItems = 0u;
+                    X11Card bytesAfter = 0u;
+                    keel::u8* propData = nullptr;
+                    const keel::i32 rc = x11.GetWindowProperty(
+                        display,
+                        window,
+                        ev.xselection.property,
+                        0,
+                        262144, // up to 1 MiB (in 32-bit longs)
+                        True,
+                        AnyPropertyType,
+                        &actualType,
+                        &actualFormat,
+                        &numItems,
+                        &bytesAfter,
+                        &propData
+                    );
+                    bool ok = false;
+                    if (rc == Success && propData && actualFormat == 8 && numItems > 0u) {
+                        out = keel::String::from(
+                            keel::StringRef(reinterpret_cast<const char*>(propData), keel::as<keel::usize>(numItems))
+                        );
+                        ok = true;
+                    }
+                    if (propData) {
+                        x11.Free(propData);
+                    }
+                    return ok;
+                }
+
+                const keel::u64 nowMs = keel::monotonic_ms();
+                if (nowMs >= deadlineMs) {
+                    return false;
+                }
+                struct pollfd pfd{};
+                pfd.fd = x11Fd;
+                pfd.events = POLLIN;
+                const keel::i32 remMs = keel::as<keel::i32>(deadlineMs - nowMs);
+                if (::poll(&pfd, 1, remMs) <= 0) {
+                    return false;
+                }
+            }
+        };
+
+        keel::String result;
+        if (atomUtf8String != kX11None && requestTarget(atomUtf8String, result)) {
+            return result;
+        }
+        if (requestTarget(kX11XaString, result)) {
+            return result;
+        }
+        return {};
+    }
+
+    void HandleSelectionRequest(const XSelectionRequestEvent& req) noexcept {
+        if (!display || !x11.SendEvent || !x11.ChangeProperty) return;
+        XEvent reply{};
+        reply.xselection.type = SelectionNotify;
+        reply.xselection.display = req.display;
+        reply.xselection.requestor = req.requestor;
+        reply.xselection.selection = req.selection;
+        reply.xselection.target = req.target;
+        reply.xselection.property = (req.property != kX11None) ? req.property : req.target;
+        reply.xselection.time = req.time;
+
+        bool handled = false;
+        if (req.selection == atomClipboard && reply.xselection.property != kX11None) {
+            if (req.target == atomTargets && atomTargets != kX11None) {
+                Atom supported[3]{atomTargets, atomUtf8String, kX11XaString};
+                const keel::i32 count = (atomUtf8String != kX11None) ? 3 : 2;
+                if (atomUtf8String == kX11None) {
+                    supported[1] = kX11XaString;
+                }
+                (void)x11.ChangeProperty(
+                    display,
+                    req.requestor,
+                    reply.xselection.property,
+                    kX11XaAtom,
+                    32,
+                    PropModeReplace,
+                    reinterpret_cast<const keel::u8*>(supported),
+                    count
+                );
+                handled = true;
+            } else if ((atomUtf8String != kX11None && req.target == atomUtf8String) ||
+                       req.target == kX11XaString) {
+                (void)x11.ChangeProperty(
+                    display,
+                    req.requestor,
+                    reply.xselection.property,
+                    req.target,
+                    8,
+                    PropModeReplace,
+                    reinterpret_cast<const keel::u8*>(clipboardText.c_str()),
+                    keel::as<keel::i32>(clipboardText.size())
+                );
+                handled = true;
+            }
+        }
+
+        if (!handled) {
+            reply.xselection.property = kX11None;
+        }
+        (void)x11.SendEvent(display, req.requestor, False, 0, &reply);
+        x11.Flush(display);
+    }
+
+    void ApplyWindowIcon() {
+        if (!display || window == 0 || !x11.ChangeProperty) return;
+        const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png");
+        if (!iconAsset || iconAsset->Empty()) return;
+
+        keel::u32 srcW = 0u;
+        keel::u32 srcH = 0u;
+        keel::Array<keel::u32> rgba;
+        if (!DecodeImageFromMemory(iconAsset->Bytes(), srcW, srcH, rgba) || srcW == 0u || srcH == 0u) {
+            return;
+        }
+
+        const Atom netWmIcon = x11.InternAtom(display, "_NET_WM_ICON", False);
+        if (netWmIcon == kX11None) return;
+
+        keel::Array<X11Card> iconData;
+        iconData.reserve(64u * 64u + 32u * 32u + 4u);
+        AppendDownsampledNetWmIcon(iconData, rgba.data(), srcW, srcH, 64u);
+        AppendDownsampledNetWmIcon(iconData, rgba.data(), srcW, srcH, 32u);
+
+        (void)x11.ChangeProperty(
+            display,
+            window,
+            netWmIcon,
+            kX11XaCardinal,
+            32,
+            PropModeReplace,
+            reinterpret_cast<const keel::u8*>(iconData.data()),
+            keel::as<keel::i32>(iconData.size())
+        );
+    }
+
+    void ApplyWindowStateFlags(const PlatformWindowDesc& desc) noexcept {
+        if (!display || window == 0 || !x11.ChangeProperty) return;
+
+        if (desc.borderless) {
+            const Atom motifHintsAtom = x11.InternAtom(display, "_MOTIF_WM_HINTS", False);
+            if (motifHintsAtom != kX11None) {
+                struct MotifWmHints {
+                    X11Card flags;
+                    X11Card functions;
+                    X11Card decorations;
+                    X11Long inputMode;
+                    X11Card status;
+                };
+                const MotifWmHints hints{2u, 0u, 0u, 0, 0u}; // MWM_HINTS_DECORATIONS = 2, decorations = 0
+                (void)x11.ChangeProperty(
+                    display,
+                    window,
+                    motifHintsAtom,
+                    motifHintsAtom,
+                    32,
+                    PropModeReplace,
+                    reinterpret_cast<const keel::u8*>(&hints),
+                    5
+                );
+            }
+        }
+
+        if (desc.fullscreen || desc.maximized) {
+            const Atom netWmState = x11.InternAtom(display, "_NET_WM_STATE", False);
+            if (netWmState != kX11None) {
+                Atom states[2]{};
+                keel::i32 count = 0;
+                if (desc.fullscreen) {
+                    const Atom fs = x11.InternAtom(display, "_NET_WM_STATE_FULLSCREEN", False);
+                    if (fs != kX11None) states[count++] = fs;
+                } else if (desc.maximized) {
+                    const Atom maxH = x11.InternAtom(display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+                    const Atom maxV = x11.InternAtom(display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+                    if (maxH != kX11None) states[count++] = maxH;
+                    if (maxV != kX11None) states[count++] = maxV;
+                }
+                if (count > 0) {
+                    (void)x11.ChangeProperty(
+                        display,
+                        window,
+                        netWmState,
+                        kX11XaAtom,
+                        32,
+                        PropModeReplace,
+                        reinterpret_cast<const keel::u8*>(states),
+                        count
+                    );
+                }
+            }
+        }
     }
 
     void DispatchEvent(XEvent& ev, Context& ui) {
@@ -579,11 +909,21 @@ struct X11PlatformWindow::Impl {
                 minimized = true;
                 break;
 
+            case SelectionRequest:
+                HandleSelectionRequest(ev.xselectionrequest);
+                break;
+
+            case FocusOut:
+                ui.SetKeyModifiers({});
+                break;
+
             case MotionNotify:
+                ui.SetKeyModifiers(ExtractX11Modifiers(ev.xmotion.state));
                 ui.OnMouseMove({keel::as<keel::f32>(ev.xmotion.x), keel::as<keel::f32>(ev.xmotion.y)});
                 break;
 
             case ButtonPress:
+                ui.SetKeyModifiers(ExtractX11Modifiers(ev.xbutton.state));
                 ui.OnMouseMove({keel::as<keel::f32>(ev.xbutton.x), keel::as<keel::f32>(ev.xbutton.y)});
                 if (ev.xbutton.button == 1) ui.OnMouseDown(1);
                 else if (ev.xbutton.button == 2) ui.OnMouseDown(2);
@@ -595,18 +935,26 @@ struct X11PlatformWindow::Impl {
                 break;
 
             case ButtonRelease:
+                ui.SetKeyModifiers(ExtractX11Modifiers(ev.xbutton.state));
                 ui.OnMouseMove({keel::as<keel::f32>(ev.xbutton.x), keel::as<keel::f32>(ev.xbutton.y)});
                 if (ev.xbutton.button == 1) ui.OnMouseUp(1);
                 else if (ev.xbutton.button == 2) ui.OnMouseUp(2);
                 else if (ev.xbutton.button == 3) ui.OnMouseUp(3);
                 break;
 
+            case KeyRelease: {
+                KeyModifiers mods = ExtractX11Modifiers(ev.xkey.state);
+                const KeySym ks = x11.LookupKeysym(&ev.xkey, 0);
+                if (ks == XK_Shift_L || ks == XK_Shift_R) mods.shift = false;
+                else if (ks == XK_Control_L || ks == XK_Control_R) mods.ctrl = false;
+                else if (ks == XK_Alt_L || ks == XK_Alt_R) mods.alt = false;
+                ui.SetKeyModifiers(mods);
+                break;
+            }
+
             case KeyPress: {
-                const keel::u32 state = ev.xkey.state;
-                KeyModifiers mods{};
-                mods.shift = (state & ShiftMask) != 0u;
-                mods.ctrl = (state & ControlMask) != 0u;
-                mods.alt = (state & Mod1Mask) != 0u;
+                const KeyModifiers mods = ExtractX11Modifiers(ev.xkey.state);
+                ui.SetKeyModifiers(mods);
 
                 const KeySym ks = x11.LookupKeysym(&ev.xkey, 0);
                 const Key logicalKey = MapX11KeySym(ks);
@@ -725,6 +1073,10 @@ bool X11PlatformWindow::Create(
     m_impl->x11.SelectInput(m_impl->display, m_impl->window, eventMask);
 
     m_impl->wmDeleteWindow = m_impl->x11.InternAtom(m_impl->display, "WM_DELETE_WINDOW", False);
+    m_impl->atomClipboard = m_impl->x11.InternAtom(m_impl->display, "CLIPBOARD", False);
+    m_impl->atomUtf8String = m_impl->x11.InternAtom(m_impl->display, "UTF8_STRING", False);
+    m_impl->atomTargets = m_impl->x11.InternAtom(m_impl->display, "TARGETS", False);
+    m_impl->atomClipboardProp = m_impl->x11.InternAtom(m_impl->display, "GUIKIT_CLIPBOARD", False);
     m_impl->x11.SetWMProtocols(m_impl->display, m_impl->window, &m_impl->wmDeleteWindow, 1);
 
     const keel::String titleStr = keel::String::from(desc.title.as_ref());
@@ -784,13 +1136,16 @@ bool X11PlatformWindow::Create(
         }
     }
 
+    m_impl->ApplyWindowIcon();
+    m_impl->ApplyWindowStateFlags(desc);
+
     m_impl->wakeFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 
-    // Bind in-process clipboard callbacks cleanly (OS X11 selection protocol can layer on top later)
+    // Bind X11 CLIPBOARD selection protocol callbacks (UTF8_STRING / STRING / TARGETS)
     Impl* rawImpl = m_impl.get();
     ui.SetClipboardCallbacks(
-        [rawImpl]() -> keel::String { return rawImpl->clipboardText.clone(); },
-        [rawImpl](keel::StringRef txt) { rawImpl->clipboardText = keel::String::from(txt); }
+        [rawImpl]() -> keel::String { return rawImpl->GetSystemClipboard(); },
+        [rawImpl](keel::StringRef txt) { rawImpl->SetSystemClipboard(txt); }
     );
 
     m_impl->x11.MapWindow(m_impl->display, m_impl->window);

@@ -19,7 +19,9 @@
 #define WM_MOUSEHWHEEL 0x020E
 #endif
 
+#include "guikit/backend/vector_backend.hpp"
 #include "guikit/context.hpp"
+#include "guikit/core/assets.hpp"
 #include "keel/array.h"
 #include "keel/dynlib.h"
 #include "keel/format.h"
@@ -43,6 +45,9 @@ static constexpr keel::i32 kWglDoubleBufferArb          = 0x2011;
 static constexpr keel::i32 kWglPixelTypeArb             = 0x2013;
 static constexpr keel::i32 kWglColorBitsArb             = 0x2014;
 static constexpr keel::i32 kWglAlphaBitsArb             = 0x201B;
+static constexpr keel::i32 kWglStencilBitsArb           = 0x2023;
+static constexpr keel::i32 kWglSampleBuffersArb         = 0x2041;
+static constexpr keel::i32 kWglSamplesArb               = 0x2042;
 static constexpr keel::i32 kWglAccelerationArb          = 0x2003;
 static constexpr keel::i32 kWglFullAccelerationArb      = 0x2027;
 static constexpr keel::i32 kWglTypeRgbaArb              = 0x202B;
@@ -357,6 +362,87 @@ void WriteWin32Clipboard(HWND hwnd, keel::StringRef utf8) {
     ::CloseClipboard();
 }
 
+[[nodiscard]] HICON CreateDownsampledWin32Icon(
+    const keel::u32* srcRgba,
+    keel::u32 srcW,
+    keel::u32 srcH,
+    keel::u32 dstDim
+) noexcept {
+    if (!srcRgba || srcW == 0u || srcH == 0u || dstDim == 0u) {
+        return nullptr;
+    }
+
+    BITMAPV5HEADER bi{};
+    bi.bV5Size = sizeof(BITMAPV5HEADER);
+    bi.bV5Width = keel::as<LONG>(dstDim);
+    bi.bV5Height = -keel::as<LONG>(dstDim); // top-down DIB
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000u;
+    bi.bV5GreenMask = 0x0000FF00u;
+    bi.bV5BlueMask = 0x000000FFu;
+    bi.bV5AlphaMask = 0xFF000000u;
+
+    void* bits = nullptr;
+    HDC screenDc = ::GetDC(nullptr);
+    HBITMAP colorBmp = ::CreateDIBSection(
+        screenDc,
+        reinterpret_cast<const BITMAPINFO*>(&bi),
+        DIB_RGB_COLORS,
+        &bits,
+        nullptr,
+        0u
+    );
+    ::ReleaseDC(nullptr, screenDc);
+    if (!colorBmp || !bits) {
+        if (colorBmp) ::DeleteObject(colorBmp);
+        return nullptr;
+    }
+
+    auto* dst = static_cast<keel::u32*>(bits);
+    for (keel::u32 y = 0u; y < dstDim; ++y) {
+        const keel::u32 sy0 = (y * srcH) / dstDim;
+        const keel::u32 sy1 = keel::max(sy0 + 1u, ((y + 1u) * srcH) / dstDim);
+        for (keel::u32 x = 0u; x < dstDim; ++x) {
+            const keel::u32 sx0 = (x * srcW) / dstDim;
+            const keel::u32 sx1 = keel::max(sx0 + 1u, ((x + 1u) * srcW) / dstDim);
+            keel::u64 sumR = 0u, sumG = 0u, sumB = 0u, sumA = 0u, cnt = 0u;
+            for (keel::u32 sy = sy0; sy < sy1 && sy < srcH; ++sy) {
+                const keel::u32* row = srcRgba + keel::as<keel::usize>(sy) * srcW;
+                for (keel::u32 sx = sx0; sx < sx1 && sx < srcW; ++sx) {
+                    const keel::u32 p = row[sx];
+                    sumR += (p & 0xFFu);
+                    sumG += ((p >> 8) & 0xFFu);
+                    sumB += ((p >> 16) & 0xFFu);
+                    sumA += ((p >> 24) & 0xFFu);
+                    ++cnt;
+                }
+            }
+            if (cnt == 0u) cnt = 1u;
+            const keel::u32 r = keel::as<keel::u32>(sumR / cnt);
+            const keel::u32 g = keel::as<keel::u32>(sumG / cnt);
+            const keel::u32 b = keel::as<keel::u32>(sumB / cnt);
+            const keel::u32 a = keel::as<keel::u32>(sumA / cnt);
+            // Win32 BGRA32 (0xAARRGGBB in little-endian uint32)
+            dst[keel::as<keel::usize>(y) * dstDim + x] = (a << 24) | (r << 16) | (g << 8) | b;
+        }
+    }
+
+    HBITMAP maskBmp = ::CreateBitmap(keel::as<keel::i32>(dstDim), keel::as<keel::i32>(dstDim), 1u, 1u, nullptr);
+    HICON icon = nullptr;
+    if (maskBmp) {
+        ICONINFO ii{};
+        ii.fIcon = TRUE;
+        ii.hbmMask = maskBmp;
+        ii.hbmColor = colorBmp;
+        icon = ::CreateIconIndirect(&ii);
+        ::DeleteObject(maskBmp);
+    }
+    ::DeleteObject(colorBmp);
+    return icon;
+}
+
 } // namespace
 
 struct Win32PlatformWindow::Impl {
@@ -365,6 +451,8 @@ struct Win32PlatformWindow::Impl {
     HDC hdc{nullptr};
     HGLRC hglrc{nullptr};
     HANDLE wakeEvent{nullptr};
+    HICON iconBig{nullptr};
+    HICON iconSmall{nullptr};
 
     PfnWglChoosePixelFormatArb wglChoosePixelFormatArb{nullptr};
     PfnWglCreateContextAttribsArb wglCreateContextAttribsArb{nullptr};
@@ -414,6 +502,14 @@ struct Win32PlatformWindow::Impl {
         if (wakeEvent) {
             (void)::CloseHandle(wakeEvent);
             wakeEvent = nullptr;
+        }
+        if (iconBig) {
+            (void)::DestroyIcon(iconBig);
+            iconBig = nullptr;
+        }
+        if (iconSmall) {
+            (void)::DestroyIcon(iconSmall);
+            iconSmall = nullptr;
         }
         ui = nullptr;
         callbacks = {};
@@ -494,20 +590,42 @@ struct Win32PlatformWindow::Impl {
 
         keel::i32 pixelFormat = 0;
         if (wglChoosePixelFormatArb) {
-            const int pfAttribs[] = { // keel-lint: ignore
-                kWglDrawToWindowArb, 1,
-                kWglSupportOpenGlArb, 1,
-                kWglDoubleBufferArb, 1,
-                kWglAccelerationArb, kWglFullAccelerationArb,
-                kWglPixelTypeArb, kWglTypeRgbaArb,
-                kWglColorBitsArb, 32,
-                kWglAlphaBitsArb, 8,
-                0
+            struct PfProfile {
+                keel::i32 stencilBits;
+                keel::i32 sampleBuffers;
+                keel::i32 samples;
             };
-            int chosen = 0; // keel-lint: ignore
-            UINT numFormats = 0u;
-            if (wglChoosePixelFormatArb(hdc, pfAttribs, nullptr, 1u, &chosen, &numFormats) && numFormats > 0u) {
-                pixelFormat = keel::as<keel::i32>(chosen);
+            static constexpr PfProfile kProfiles[] = {
+                {8, 1, 4}, // 4x MSAA + 8-bit stencil
+                {8, 1, 2}, // 2x MSAA + 8-bit stencil
+                {8, 0, 0}, // 8-bit stencil without MSAA
+                {0, 0, 0}  // Minimal RGBA8 fallback
+            };
+            for (const PfProfile& prof : kProfiles) {
+                int pfAttribs[24]{}; // keel-lint: ignore
+                keel::usize idx = 0u;
+                pfAttribs[idx++] = kWglDrawToWindowArb;  pfAttribs[idx++] = 1;
+                pfAttribs[idx++] = kWglSupportOpenGlArb; pfAttribs[idx++] = 1;
+                pfAttribs[idx++] = kWglDoubleBufferArb;  pfAttribs[idx++] = 1;
+                pfAttribs[idx++] = kWglAccelerationArb;  pfAttribs[idx++] = kWglFullAccelerationArb;
+                pfAttribs[idx++] = kWglPixelTypeArb;     pfAttribs[idx++] = kWglTypeRgbaArb;
+                pfAttribs[idx++] = kWglColorBitsArb;     pfAttribs[idx++] = 32;
+                pfAttribs[idx++] = kWglAlphaBitsArb;     pfAttribs[idx++] = 8;
+                if (prof.stencilBits > 0) {
+                    pfAttribs[idx++] = kWglStencilBitsArb; pfAttribs[idx++] = prof.stencilBits;
+                }
+                if (prof.sampleBuffers > 0) {
+                    pfAttribs[idx++] = kWglSampleBuffersArb; pfAttribs[idx++] = prof.sampleBuffers;
+                    pfAttribs[idx++] = kWglSamplesArb;       pfAttribs[idx++] = prof.samples;
+                }
+                pfAttribs[idx++] = 0;
+
+                int chosen = 0; // keel-lint: ignore
+                UINT numFormats = 0u;
+                if (wglChoosePixelFormatArb(hdc, pfAttribs, nullptr, 1u, &chosen, &numFormats) && numFormats > 0u) {
+                    pixelFormat = keel::as<keel::i32>(chosen);
+                    break;
+                }
             }
         }
 
@@ -518,6 +636,7 @@ struct Win32PlatformWindow::Impl {
         pfd.iPixelType = PFD_TYPE_RGBA;
         pfd.cColorBits = 32;
         pfd.cAlphaBits = 8;
+        pfd.cStencilBits = 8;
         pfd.iLayerType = PFD_MAIN_PLANE;
 
         if (pixelFormat == 0) {
@@ -977,6 +1096,21 @@ bool Win32PlatformWindow::Create(
     }
 
     ApplyDwmDarkTitlebar(m_impl->hwnd);
+    if (const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png"); iconAsset && !iconAsset->Empty()) {
+        keel::u32 srcW = 0u;
+        keel::u32 srcH = 0u;
+        keel::Array<keel::u32> rgba;
+        if (DecodeImageFromMemory(iconAsset->Bytes(), srcW, srcH, rgba) && srcW > 0u && srcH > 0u) {
+            m_impl->iconBig = CreateDownsampledWin32Icon(rgba.data(), srcW, srcH, 64u);
+            m_impl->iconSmall = CreateDownsampledWin32Icon(rgba.data(), srcW, srcH, 32u);
+            if (m_impl->iconBig) {
+                ::SendMessageW(m_impl->hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(m_impl->iconBig));
+            }
+            if (m_impl->iconSmall) {
+                ::SendMessageW(m_impl->hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(m_impl->iconSmall));
+            }
+        }
+    }
     m_impl->UpdateDpiMetrics(QueryWindowDpi(m_impl->hwnd));
 
     // Preload system cursor handles

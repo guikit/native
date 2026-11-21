@@ -43,6 +43,8 @@ static constexpr keel::f32 kModeTexture     = 2.0f;
 static constexpr keel::f32 kModeGlyphR8     = 3.0f;
 static constexpr keel::f32 kModeGlyphLcdRgb = 4.0f;
 static constexpr keel::f32 kModeGlyphLcdBgr = 5.0f;
+static constexpr keel::f32 kModeArc         = 6.0f;
+static constexpr keel::f32 kModeShadow      = 7.0f;
 
 static constexpr keel::u32 kAtlasSize    = 2048u;
 static constexpr keel::u32 kLcdAtlasSize = 1024u;
@@ -74,14 +76,14 @@ void main() {
 
     float mode = a_Params.z;
     vec2 posPx;
-    if (mode > 2.5) {
-        // Mode 3 (GlyphR8): a_Rect=(localX,localY,w,h), a_Stroke.xy=pivotPx, a_Params.xy=(cosA,sinA)
+    if (mode > 2.5 && mode < 5.5) {
+        // Modes 3..5 (FreeType Glyphs): a_Rect=(localX,localY,w,h), a_Stroke.xy=pivotPx, a_Params.xy=(cosA,sinA)
         vec2 pLocal = a_Rect.xy + corner * a_Rect.zw;
         vec2 rot = vec2(pLocal.x * a_Params.x - pLocal.y * a_Params.y,
                         pLocal.x * a_Params.y + pLocal.y * a_Params.x);
         posPx = a_Stroke.xy + rot;
     } else {
-        float pad = (mode < 1.5) ? 1.5 : 0.0;
+        float pad = (mode < 1.5 || mode > 5.5) ? 1.5 : 0.0;
         vec2 rectMin = a_Rect.xy - vec2(pad);
         vec2 rectSize = a_Rect.zw + vec2(pad * 2.0);
         posPx = rectMin + corner * rectSize;
@@ -90,7 +92,7 @@ void main() {
     vec2 center = a_Rect.xy + a_Rect.zw * 0.5;
     v_HalfSize = a_Rect.zw * 0.5;
     v_LocalPx = (mode > 0.5 && mode < 1.5) ? posPx : (posPx - center);
-    v_Uv = (mode > 0.5 && mode < 1.5) ? a_Uv : vec4(mix(a_Uv.xy, a_Uv.zw, corner), 0.0, 0.0);
+    v_Uv = ((mode > 0.5 && mode < 1.5) || mode > 5.5) ? a_Uv : vec4(mix(a_Uv.xy, a_Uv.zw, corner), 0.0, 0.0);
     v_Fill = a_Fill;
     v_Stroke = a_Stroke;
     v_Params = a_Params;
@@ -125,6 +127,42 @@ float sdSegment(vec2 p, vec2 a, vec2 b) {
     float denom = max(dot(ba, ba), 1e-6);
     float h = clamp(dot(pa, ba) / denom, 0.0, 1.0);
     return length(pa - ba * h);
+}
+
+vec4 erfApprox(vec4 x) {
+    vec4 s = sign(x);
+    vec4 a = abs(x);
+    x = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+    x *= x;
+    return s - s / (x * x);
+}
+
+float roundedBoxShadowX(float x, float y, float sigma, float corner, vec2 halfSize) {
+    float delta = min(halfSize.y - corner - abs(y), 0.0);
+    float curved = halfSize.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+    vec4 integral = 0.5 + 0.5 * erfApprox((x + vec4(-curved, curved, 0.0, 0.0)) * (0.70710678 / sigma));
+    return integral.y - integral.x;
+}
+
+float roundedBoxShadow(vec2 p, vec2 halfSize, float sigma, float corner) {
+    float r = min(corner, min(halfSize.x, halfSize.y));
+    if (sigma < 0.5) {
+        float d = sdRoundedBox(p, halfSize, r);
+        return 1.0 - smoothstep(-0.65, 0.65, d);
+    }
+    float low = p.y - halfSize.y;
+    float high = p.y + halfSize.y;
+    float start = clamp(-3.0 * sigma, low, high);
+    float end = clamp(3.0 * sigma, low, high);
+    float step = (end - start) * 0.25;
+    float y = start + step * 0.5;
+    float value = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        value += roundedBoxShadowX(p.x, p.y - y, sigma, r, halfSize)
+               * exp(-(y * y) / (2.0 * sigma * sigma)) * (0.39894228 / sigma) * step;
+        y += step;
+    }
+    return clamp(value, 0.0, 1.0);
 }
 
 void main() {
@@ -180,6 +218,53 @@ void main() {
         col.a *= mask;
         if (col.a <= 0.001) discard;
         FragColor = col;
+        return;
+    }
+
+    if (mode > 6.5) {
+        // Mode 7: Analytical Gaussian drop shadow for a rounded rectangle (single quad)
+        // v_LocalPx = offset from shadow caster center, v_Uv.xy = caster halfSizePx
+        // v_Params = (cornerRadiusPx, sigmaPx, 7.0, 0.0)
+        float cov = roundedBoxShadow(v_LocalPx, v_Uv.xy, strokeW, radius);
+        float alpha = v_Fill.a * cov;
+        if (alpha <= 0.001) discard;
+        FragColor = vec4(v_Fill.rgb, alpha);
+        return;
+    }
+
+    if (mode > 5.5) {
+        // Mode 6: Analytical circular arc SDF (exact circle + integrated round/flat caps, 256-level AA)
+        // v_LocalPx = offset from arc center in physical pixels
+        // v_Uv = (cosMid, sinMid, cosHalfAperture, sinHalfAperture)
+        // v_Params = (arcRadiusPx, strokeWidthPx, 6.0, capMode: 0=flat, 1=round, 2=fullRing)
+        float ra = radius;
+        float rb = max(strokeW * 0.5, 0.5);
+        float capMode = v_Params.w;
+        float d;
+        if (capMode > 1.5) {
+            d = abs(length(v_LocalPx) - ra) - rb;
+        } else {
+            vec2 q = vec2(
+                v_LocalPx.x * v_Uv.x + v_LocalPx.y * v_Uv.y,
+                abs(-v_LocalPx.x * v_Uv.y + v_LocalPx.y * v_Uv.x)
+            );
+            vec2 sc = v_Uv.zw;
+            float tang = q.y * sc.x - q.x * sc.y;
+            float ringD = abs(length(q) - ra) - rb;
+            if (capMode > 0.5) {
+                d = (tang <= 0.0) ? ringD : (length(q - sc * ra) - rb);
+            } else if (tang <= 0.0) {
+                d = max(ringD, tang);
+            } else {
+                float rad = dot(q, sc);
+                float radDist = max(abs(rad - ra) - rb, 0.0);
+                d = length(vec2(radDist, tang));
+            }
+        }
+        float cov = 1.0 - smoothstep(-0.65, 0.65, d);
+        float alpha = v_Fill.a * cov;
+        if (alpha <= 0.001) discard;
+        FragColor = vec4(v_Fill.rgb, alpha);
         return;
     }
 
@@ -522,8 +607,14 @@ struct GlEs3Canvas::Impl {
     GlEs3Api gl{};
     bool initialized{false};
     bool isDesktopGl{false};
+    keel::i32 msaaSamples{0};
+    keel::i32 stencilBits{0};
     keel::String glVersion;
     keel::String glRenderer;
+
+    [[nodiscard]] bool HasStencilOps() const noexcept {
+        return stencilBits > 0 && gl.ColorMask && gl.StencilFunc && gl.StencilOp && gl.StencilMask;
+    }
 
     GLuint quadProg{0};
     GLint quadUniformViewport{-1};
@@ -745,6 +836,38 @@ struct GlEs3Canvas::Impl {
 
         gl.BindTexture(kGlTexture2D, 0);
         activeTex = whiteTex;
+
+        // Query active MSAA sample count & default framebuffer stencil bit depth
+        if (gl.GetIntegerv) {
+            while (gl.GetError() != 0u) {}
+            GLint samples = 0;
+            gl.GetIntegerv(kGlSamples, &samples);
+            if (gl.GetError() == 0u && samples > 0) {
+                msaaSamples = keel::as<keel::i32>(samples);
+            }
+        }
+        if (gl.GetFramebufferAttachmentParameteriv) {
+            while (gl.GetError() != 0u) {}
+            GLint bits = 0;
+            gl.GetFramebufferAttachmentParameteriv(
+                kGlFramebuffer, kGlStencil, kGlFramebufferAttachmentStencilSize, &bits
+            );
+            if (gl.GetError() == 0u && bits > 0) {
+                stencilBits = keel::as<keel::i32>(bits);
+            }
+        }
+        if (stencilBits == 0 && gl.GetIntegerv) {
+            while (gl.GetError() != 0u) {}
+            GLint bits = 0;
+            gl.GetIntegerv(kGlStencilBits, &bits);
+            if (gl.GetError() == 0u && bits > 0) {
+                stencilBits = keel::as<keel::i32>(bits);
+            }
+        }
+        if (stencilBits > 0 && gl.ClearStencil) {
+            gl.ClearStencil(0);
+        }
+
         initialized = true;
         return true;
     }
@@ -1279,6 +1402,14 @@ keel::StringRef GlEs3Canvas::GetGlRendererString() const noexcept {
     return m_impl ? m_impl->glRenderer.as_ref() : keel::StringRef{};
 }
 
+keel::i32 GlEs3Canvas::GetMsaaSamples() const noexcept {
+    return m_impl ? m_impl->msaaSamples : 0;
+}
+
+keel::i32 GlEs3Canvas::GetStencilBits() const noexcept {
+    return m_impl ? m_impl->stencilBits : 0;
+}
+
 bool GlEs3Canvas::LoadFontFile(keel::StringRef path, FontStyle style) {
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     if (const auto asset = Assets::Find(path); asset && !asset->Empty()) {
@@ -1333,8 +1464,12 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     auto& gl = m_impl->gl;
     gl.Viewport(0, 0, keel::as<GLsizei>(width), keel::as<GLsizei>(height));
     gl.Disable(kGlDepthTest);
+    gl.Disable(kGlStencilTest);
     gl.Disable(kGlCullFace);
     gl.Disable(kGlScissorTest);
+    if (m_impl->isDesktopGl && m_impl->msaaSamples > 1) {
+        gl.Enable(kGlMultisample);
+    }
     gl.Enable(kGlBlend);
     gl.BlendEquation(kGlFuncAdd);
     gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
@@ -1383,7 +1518,13 @@ void GlEs3Canvas::Clear(Color color, keel::Optional<Rect> rect) {
     if (!rect.has_value()) {
         gl.Disable(kGlScissorTest);
         gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
-        gl.Clear(kGlColorBufferBit);
+        GLbitfield mask = kGlColorBufferBit;
+        if (m_impl->stencilBits > 0) {
+            if (gl.StencilMask) gl.StencilMask(0xFFu);
+            if (gl.ClearStencil) gl.ClearStencil(0);
+            mask |= kGlStencilBufferBit;
+        }
+        gl.Clear(mask);
         m_impl->ApplyClip();
     } else {
         const Rect pr = m_impl->PxRect(*rect);
@@ -1455,6 +1596,38 @@ void GlEs3Canvas::DrawRoundRect(
         fill.r / 255.0f, fill.g / 255.0f, fill.b / 255.0f, fill.a / 255.0f,
         stroke.r / 255.0f, stroke.g / 255.0f, stroke.b / 255.0f, stroke.a / 255.0f,
         rPx, swPx, kModeRoundRect, 0.0f
+    }, 0u);
+}
+
+void GlEs3Canvas::DrawShadow(
+    Rect rect,
+    keel::f32 cornerRadius,
+    keel::f32 blurRadius,
+    Vec2 offset,
+    Color color,
+    keel::f32 spread
+) {
+    if (!m_impl->initialized || color.a == 0u || rect.w <= 0.0f || rect.h <= 0.0f) return;
+    const Rect shifted(
+        rect.x + offset.x - spread,
+        rect.y + offset.y - spread,
+        rect.w + spread * 2.0f,
+        rect.h + spread * 2.0f
+    );
+    if (shifted.w <= 0.0f || shifted.h <= 0.0f) return;
+
+    const keel::f32 eff = m_impl->EffScale();
+    const Rect pr = m_impl->PxRect(shifted);
+    const keel::f32 sigma = keel::max(0.0f, blurRadius * eff * 0.5f);
+    const keel::f32 rPx = keel::clamp((cornerRadius + spread) * eff, 0.0f, keel::min(pr.w, pr.h) * 0.5f);
+    const keel::f32 pad = keel::ceil(3.0f * sigma) + 1.0f;
+
+    m_impl->PushQuad(QuadInstance{
+        pr.x - pad, pr.y - pad, pr.w + pad * 2.0f, pr.h + pad * 2.0f,
+        pr.w * 0.5f, pr.h * 0.5f, 0.0f, 0.0f,
+        color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
+        0.0f, 0.0f, 0.0f, 0.0f,
+        rPx, sigma, kModeShadow, 0.0f
     }, 0u);
 }
 
@@ -1683,6 +1856,44 @@ void GlEs3Canvas::DrawLine(Vec2 p1, Vec2 p2, Color color, keel::f32 strokeWidth)
     }, 0u);
 }
 
+void GlEs3Canvas::DrawArc(
+    Vec2 center,
+    keel::f32 radius,
+    keel::f32 startAngleRad,
+    keel::f32 endAngleRad,
+    Color color,
+    keel::f32 strokeWidth,
+    bool roundCaps
+) {
+    if (!m_impl->initialized || color.a == 0u || radius <= 0.25f || strokeWidth <= 0.0f) return;
+    keel::f32 a0 = startAngleRad;
+    keel::f32 a1 = endAngleRad;
+    if (a1 < a0) {
+        keel::swap(a0, a1);
+    }
+    const keel::f32 span = a1 - a0;
+    if (span < 1e-4f) return;
+
+    const keel::f32 eff = m_impl->EffScale();
+    const Vec2 cPx = m_impl->PxPt(center);
+    const keel::f32 ra = radius * eff;
+    const keel::f32 swPx = keel::max(1.0f, strokeWidth * eff);
+    const keel::f32 outerR = ra + swPx * 0.5f + 1.0f;
+
+    const bool fullRing = (span >= keel::kTauF - 1e-4f);
+    const keel::f32 midAngle = 0.5f * (a0 + a1);
+    const keel::f32 halfAp = fullRing ? keel::kPiF : (0.5f * span);
+    const keel::f32 capMode = fullRing ? 2.0f : (roundCaps ? 1.0f : 0.0f);
+
+    m_impl->PushQuad(QuadInstance{
+        cPx.x - outerR, cPx.y - outerR, outerR * 2.0f, outerR * 2.0f,
+        keel::cos(midAngle), keel::sin(midAngle), keel::cos(halfAp), keel::sin(halfAp),
+        color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
+        0.0f, 0.0f, 0.0f, 0.0f,
+        ra, swPx, kModeArc, capMode
+    }, 0u);
+}
+
 void GlEs3Canvas::DrawTriangle(
     Vec2 p1,
     Vec2 p2,
@@ -1709,22 +1920,76 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
     const bool doStroke = paint.renderStroke && paint.strokeColor.a > 0u && paint.strokeWidthPx > 0.0f;
     if (!doFill && !doStroke) return;
 
-    keel::Array<Vec2> sub;
-    bool subClosed = false;
+    struct Subpath {
+        keel::Array<Vec2> pts;
+        bool closed{false};
+    };
 
-    auto flushSubpath = [&]() {
-        if (sub.size() < 2u) {
-            sub.clear();
-            subClosed = false;
-            return;
+    keel::Array<Subpath> subpaths;
+    Subpath cur{};
+
+    auto commitSubpath = [&]() {
+        if (cur.pts.size() >= 2u) {
+            subpaths.push_back(keel::move(cur));
         }
-        // 1. Fill via ear-clipping triangulation
-        if (doFill && sub.size() >= 3u) {
+        cur = Subpath{};
+    };
+
+    keel::usize ptIdx = 0u;
+    const keel::usize numPts = path.points.size();
+    for (PathVerb verb : path.verbs) {
+        switch (verb) {
+            case PathVerb::MoveTo:
+                commitSubpath();
+                if (ptIdx < numPts) {
+                    cur.pts.push_back(path.points[ptIdx++]);
+                }
+                break;
+            case PathVerb::LineTo:
+                if (ptIdx < numPts) {
+                    cur.pts.push_back(path.points[ptIdx++]);
+                }
+                break;
+            case PathVerb::CubicTo:
+                if (ptIdx + 2u < numPts && !cur.pts.empty()) {
+                    const Vec2 p0 = cur.pts.back();
+                    const Vec2 c1 = path.points[ptIdx];
+                    const Vec2 c2 = path.points[ptIdx + 1u];
+                    const Vec2 p3 = path.points[ptIdx + 2u];
+                    ptIdx += 3u;
+                    FlattenCubicBezier(p0, c1, c2, p3, cur.pts);
+                } else {
+                    ptIdx = keel::min(ptIdx + 3u, numPts);
+                }
+                break;
+            case PathVerb::Close:
+                cur.closed = true;
+                commitSubpath();
+                break;
+        }
+    }
+    commitSubpath();
+    if (subpaths.empty()) return;
+
+    // 1. Fill pass (all subpaths before strokes)
+    if (doFill) {
+        keel::Array<keel::Array<Vec2>> fillPolys;
+        fillPolys.reserve(subpaths.size());
+        keel::f32 minX = 1e30f;
+        keel::f32 minY = 1e30f;
+        keel::f32 maxX = -1e30f;
+        keel::f32 maxY = -1e30f;
+
+        for (const Subpath& sp : subpaths) {
+            if (sp.pts.size() < 3u) continue;
             keel::Array<Vec2> poly;
-            poly.reserve(sub.size());
-            for (const Vec2& p : sub) {
-                if (poly.empty() || keel::abs(poly.back().x - p.x) > 1e-3f || keel::abs(poly.back().y - p.y) > 1e-3f) {
-                    poly.push_back(m_impl->PxPt(p));
+            poly.reserve(sp.pts.size());
+            for (const Vec2& p : sp.pts) {
+                const Vec2 px = m_impl->PxPt(p);
+                if (poly.empty() ||
+                    keel::abs(poly.back().x - px.x) > 1e-3f ||
+                    keel::abs(poly.back().y - px.y) > 1e-3f) {
+                    poly.push_back(px);
                 }
             }
             if (poly.size() >= 3u &&
@@ -1733,65 +1998,121 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
                 poly.pop_back();
             }
             if (poly.size() >= 3u) {
-                // Compute signed area to determine winding
-                keel::f64 area2 = 0.0;
-                for (keel::usize i = 0; i < poly.size(); ++i) {
-                    const Vec2& p0 = poly[i];
-                    const Vec2& p1 = poly[(i + 1u) % poly.size()];
-                    area2 += keel::as<keel::f64>(p0.x) * p1.y - keel::as<keel::f64>(p1.x) * p0.y;
+                for (const Vec2& v : poly) {
+                    minX = keel::min(minX, v.x);
+                    minY = keel::min(minY, v.y);
+                    maxX = keel::max(maxX, v.x);
+                    maxY = keel::max(maxY, v.y);
                 }
-                const keel::f32 winding = (area2 >= 0.0) ? 1.0f : -1.0f;
-
-                keel::Array<keel::usize> idx;
-                idx.reserve(poly.size());
-                for (keel::usize i = 0; i < poly.size(); ++i) idx.push_back(i);
-
-                keel::usize guard = poly.size() * poly.size();
-                while (idx.size() > 3u && guard-- > 0u) {
-                    bool clipped = false;
-                    const keel::usize n = idx.size();
-                    for (keel::usize i = 0; i < n; ++i) {
-                        const Vec2& a = poly[idx[(i + n - 1u) % n]];
-                        const Vec2& b = poly[idx[i]];
-                        const Vec2& c = poly[idx[(i + 1u) % n]];
-                        if (Cross2D(a, b, c) * winding <= 1e-5f) continue;
-
-                        bool containsAny = false;
-                        for (keel::usize j = 0; j < n; ++j) {
-                            if (j == i || j == (i + n - 1u) % n || j == (i + 1u) % n) continue;
-                            if (PointInTri(poly[idx[j]], a, b, c)) {
-                                containsAny = true;
-                                break;
-                            }
-                        }
-                        if (!containsAny) {
-                            m_impl->PushTri(a, b, c, paint.fillColor);
-                            for (keel::usize k = i + 1u; k < n; ++k) {
-                                idx[k - 1u] = idx[k];
-                            }
-                            idx.pop_back();
-                            clipped = true;
-                            break;
-                        }
-                    }
-                    if (!clipped) break;
-                }
-                if (idx.size() == 3u) {
-                    m_impl->PushTri(poly[idx[0]], poly[idx[1]], poly[idx[2]], paint.fillColor);
-                }
+                fillPolys.push_back(keel::move(poly));
             }
         }
 
-        // 2. Stroke via anti-aliased line capsules (solid or dashed)
-        if (doStroke) {
-            const keel::usize segCount = subClosed ? sub.size() : (sub.size() - 1u);
+        if (!fillPolys.empty()) {
+            const bool useStencil = m_impl->HasStencilOps() &&
+                (paint.fillRule == FillRule::EvenOdd || fillPolys.size() > 1u);
+
+            if (useStencil) {
+                // GPU Stencil-then-Cover: handles EvenOdd holes, nested rings, self-intersections, and MSAA
+                m_impl->FlushAll();
+                auto& gl = m_impl->gl;
+                gl.Enable(kGlStencilTest);
+                gl.ColorMask(kGlFalse, kGlFalse, kGlFalse, kGlFalse);
+                gl.StencilMask(0xFFu);
+                gl.StencilFunc(kGlAlways, 0, 0xFFu);
+                if (paint.fillRule == FillRule::EvenOdd || !gl.StencilOpSeparate) {
+                    gl.StencilOp(kGlKeep, kGlKeep, kGlInvert);
+                } else {
+                    gl.StencilOpSeparate(kGlFront, kGlKeep, kGlKeep, kGlIncrWrap);
+                    gl.StencilOpSeparate(kGlBack, kGlKeep, kGlKeep, kGlDecrWrap);
+                }
+
+                const Color maskCol(255u, 255u, 255u, 255u);
+                for (const auto& poly : fillPolys) {
+                    const Vec2& anchor = poly[0];
+                    for (keel::usize i = 1u; i + 1u < poly.size(); ++i) {
+                        m_impl->PushTri(anchor, poly[i], poly[i + 1u], maskCol);
+                    }
+                }
+                m_impl->FlushTris();
+
+                // Cover bounding box & simultaneously reset touched stencil pixels back to 0
+                gl.ColorMask(kGlTrue, kGlTrue, kGlTrue, kGlTrue);
+                gl.StencilFunc(kGlNotEqual, 0, 0xFFu);
+                gl.StencilOp(kGlZero, kGlZero, kGlZero);
+
+                const Vec2 tl{minX - 1.0f, minY - 1.0f};
+                const Vec2 tr{maxX + 1.0f, minY - 1.0f};
+                const Vec2 br{maxX + 1.0f, maxY + 1.0f};
+                const Vec2 bl{minX - 1.0f, maxY + 1.0f};
+                m_impl->PushTri(tl, tr, br, paint.fillColor);
+                m_impl->PushTri(tl, br, bl, paint.fillColor);
+                m_impl->FlushTris();
+                gl.Disable(kGlStencilTest);
+            } else {
+                // Fast batched ear-clipping for single-contour NonZero polygons (zero stencil flush)
+                for (const auto& poly : fillPolys) {
+                    keel::f64 area2 = 0.0;
+                    for (keel::usize i = 0; i < poly.size(); ++i) {
+                        const Vec2& p0 = poly[i];
+                        const Vec2& p1 = poly[(i + 1u) % poly.size()];
+                        area2 += keel::as<keel::f64>(p0.x) * p1.y - keel::as<keel::f64>(p1.x) * p0.y;
+                    }
+                    const keel::f32 winding = (area2 >= 0.0) ? 1.0f : -1.0f;
+
+                    keel::Array<keel::usize> idx;
+                    idx.reserve(poly.size());
+                    for (keel::usize i = 0; i < poly.size(); ++i) idx.push_back(i);
+
+                    keel::usize guard = poly.size() * poly.size();
+                    while (idx.size() > 3u && guard-- > 0u) {
+                        bool clipped = false;
+                        const keel::usize n = idx.size();
+                        for (keel::usize i = 0; i < n; ++i) {
+                            const Vec2& a = poly[idx[(i + n - 1u) % n]];
+                            const Vec2& b = poly[idx[i]];
+                            const Vec2& c = poly[idx[(i + 1u) % n]];
+                            if (Cross2D(a, b, c) * winding <= 1e-5f) continue;
+
+                            bool containsAny = false;
+                            for (keel::usize j = 0; j < n; ++j) {
+                                if (j == i || j == (i + n - 1u) % n || j == (i + 1u) % n) continue;
+                                if (PointInTri(poly[idx[j]], a, b, c)) {
+                                    containsAny = true;
+                                    break;
+                                }
+                            }
+                            if (!containsAny) {
+                                m_impl->PushTri(a, b, c, paint.fillColor);
+                                for (keel::usize k = i + 1u; k < n; ++k) {
+                                    idx[k - 1u] = idx[k];
+                                }
+                                idx.pop_back();
+                                clipped = true;
+                                break;
+                            }
+                        }
+                        if (!clipped) break;
+                    }
+                    if (idx.size() == 3u) {
+                        m_impl->PushTri(poly[idx[0]], poly[idx[1]], poly[idx[2]], paint.fillColor);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Stroke pass (anti-aliased solid or dashed line capsules on top of fill)
+    if (doStroke) {
+        for (const Subpath& sp : subpaths) {
+            const keel::usize segCount = sp.closed ? sp.pts.size() : (sp.pts.size() - 1u);
             if (paint.dashed && paint.dashOnPx > 0.0f && paint.dashOffPx > 0.0f) {
                 const keel::f32 dashOn = paint.dashOnPx;
                 const keel::f32 period = dashOn + paint.dashOffPx;
                 keel::f32 phase = 0.0f;
                 for (keel::usize i = 0; i < segCount; ++i) {
-                    const Vec2 a = sub[i];
-                    const Vec2 b = sub[(i + 1u) % sub.size()];
+                    const Vec2 a = sp.pts[i];
+                    const Vec2 b = sp.pts[(i + 1u) % sp.pts.size()];
                     const keel::f32 dx = b.x - a.x;
                     const keel::f32 dy = b.y - a.y;
                     const keel::f32 segLen = keel::hypot(dx, dy);
@@ -1824,48 +2145,11 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
                 }
             } else {
                 for (keel::usize i = 0; i < segCount; ++i) {
-                    DrawLine(sub[i], sub[(i + 1u) % sub.size()], paint.strokeColor, paint.strokeWidthPx);
+                    DrawLine(sp.pts[i], sp.pts[(i + 1u) % sp.pts.size()], paint.strokeColor, paint.strokeWidthPx);
                 }
             }
         }
-        sub.clear();
-        subClosed = false;
-    };
-
-    keel::usize ptIdx = 0u;
-    const keel::usize numPts = path.points.size();
-    for (PathVerb verb : path.verbs) {
-        switch (verb) {
-            case PathVerb::MoveTo:
-                flushSubpath();
-                if (ptIdx < numPts) {
-                    sub.push_back(path.points[ptIdx++]);
-                }
-                break;
-            case PathVerb::LineTo:
-                if (ptIdx < numPts) {
-                    sub.push_back(path.points[ptIdx++]);
-                }
-                break;
-            case PathVerb::CubicTo:
-                if (ptIdx + 2u < numPts && !sub.empty()) {
-                    const Vec2 p0 = sub.back();
-                    const Vec2 c1 = path.points[ptIdx];
-                    const Vec2 c2 = path.points[ptIdx + 1u];
-                    const Vec2 p3 = path.points[ptIdx + 2u];
-                    ptIdx += 3u;
-                    FlattenCubicBezier(p0, c1, c2, p3, sub);
-                } else {
-                    ptIdx = keel::min(ptIdx + 3u, numPts);
-                }
-                break;
-            case PathVerb::Close:
-                subClosed = true;
-                flushSubpath();
-                break;
-        }
     }
-    flushSubpath();
 }
 
 Vec2 GlEs3Canvas::GetImageSize(keel::StringRef source) {
