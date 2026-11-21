@@ -2,6 +2,7 @@
 
 #include "gl_es3_loader.hpp"
 #include "png_decoder.hpp"
+#include "guikit/backend/text_compositor.hpp"
 #include "guikit/backend/vector_backend.hpp"
 #include "guikit/core/assets.hpp"
 #include "guikit/core/text_util.hpp"
@@ -37,12 +38,15 @@ struct TriVertex {
     float r, g, b, a;
 };
 
-static constexpr float kModeRoundRect = 0.0f;
-static constexpr float kModeLine      = 1.0f;
-static constexpr float kModeTexture   = 2.0f;
-static constexpr float kModeGlyphR8   = 3.0f;
+static constexpr float kModeRoundRect   = 0.0f;
+static constexpr float kModeLine        = 1.0f;
+static constexpr float kModeTexture     = 2.0f;
+static constexpr float kModeGlyphR8     = 3.0f;
+static constexpr float kModeGlyphLcdRgb = 4.0f;
+static constexpr float kModeGlyphLcdBgr = 5.0f;
 
-static constexpr keel::u32 kAtlasSize = 1024u;
+static constexpr keel::u32 kAtlasSize    = 2048u;
+static constexpr keel::u32 kLcdAtlasSize = 1024u;
 
 static constexpr const char* kQuadVertBody = R"GLSL(
 layout(location = 0) in vec4 a_Rect;
@@ -180,14 +184,51 @@ void main() {
         return;
     }
 
-    // Mode 3: Grayscale R8 FreeType glyph atlas
-    float cov = texture(u_Tex, v_Uv.xy).r;
-    if (cov <= 0.002) discard;
-    float stemBoost = v_Params.w;
-    if (stemBoost > 0.0) {
-        cov = clamp(cov + cov * (1.0 - cov) * stemBoost, 0.0, 1.0);
+    // Modes 3..5: FreeType glyph atlas (3=Grayscale R8, 4=LCD RGB, 5=LCD BGR)
+    // v_Stroke.z = invContrast, v_Stroke.w = gammaCorrectFlag, v_Params.w = effStemDarkening
+    float invContrast = v_Stroke.z;
+    float gammaFlag = v_Stroke.w;
+    float effDarken = v_Params.w;
+
+    if (mode < 3.5) {
+        float cov = texture(u_Tex, v_Uv.xy).r;
+        if (cov <= 0.002) discard;
+        if (abs(invContrast - 1.0) > 0.002) {
+            cov = pow(cov, invContrast);
+        }
+        if (effDarken > 0.001) {
+            cov = clamp(cov + effDarken * cov * (1.0 - cov) * (1.5 - 0.5 * cov), 0.0, 1.0);
+        }
+        if (gammaFlag > 0.5) {
+            float luma = dot(v_Fill.rgb, vec3(0.299, 0.587, 0.114));
+            float darkOnLight = 1.0 - pow(max(1.0 - cov, 0.0), 1.0 / 1.8);
+            float lightOnDark = pow(cov, 1.0 / 1.8);
+            cov = mix(darkOnLight, lightOnDark, luma);
+        }
+        FragColor = vec4(v_Fill.rgb, v_Fill.a * cov);
+        return;
     }
-    FragColor = vec4(v_Fill.rgb, v_Fill.a * cov);
+
+    // Modes 4 & 5: Per-channel LCD subpixel RGB/BGR via hardware GL_CONSTANT_COLOR + GL_ONE_MINUS_SRC_COLOR
+    vec3 cov3 = texture(u_Tex, v_Uv.xy).rgb;
+    if (mode >= 4.5) {
+        cov3 = cov3.bgr;
+    }
+    if (max(cov3.r, max(cov3.g, cov3.b)) <= 0.002) discard;
+    if (abs(invContrast - 1.0) > 0.002) {
+        cov3 = pow(max(cov3, vec3(0.0)), vec3(invContrast));
+    }
+    if (effDarken > 0.001) {
+        cov3 = clamp(cov3 + effDarken * cov3 * (1.0 - cov3) * (1.5 - 0.5 * cov3), 0.0, 1.0);
+    }
+    if (gammaFlag > 0.5) {
+        float luma = dot(v_Fill.rgb, vec3(0.299, 0.587, 0.114));
+        vec3 darkOnLight = vec3(1.0) - pow(max(vec3(1.0) - cov3, vec3(0.0)), vec3(1.0 / 1.8));
+        vec3 lightOnDark = pow(max(cov3, vec3(0.0)), vec3(1.0 / 1.8));
+        cov3 = mix(darkOnLight, lightOnDark, luma);
+    }
+    vec3 effCov = cov3 * v_Fill.a;
+    FragColor = vec4(effCov, max(effCov.r, max(effCov.g, effCov.b)));
 }
 )GLSL";
 
@@ -449,11 +490,11 @@ struct GlEs3Canvas::Impl {
         keel::u32 codepoint{0};
         keel::u16 sizeQ4{0};
         keel::u8 style{0};
-        keel::u8 hinting{0};
+        keel::u8 flags{0}; // bits [0..1] hinting, [2..3] quarter-px phase (0..3)
 
         bool operator==(const AtlasKey& o) const noexcept {
             return codepoint == o.codepoint && sizeQ4 == o.sizeQ4 &&
-                   style == o.style && hinting == o.hinting;
+                   style == o.style && flags == o.flags;
         }
     };
 
@@ -462,7 +503,7 @@ struct GlEs3Canvas::Impl {
             keel::u64 h = static_cast<keel::u64>(k.codepoint);
             h ^= (static_cast<keel::u64>(k.sizeQ4) |
                   (static_cast<keel::u64>(k.style) << 16) |
-                  (static_cast<keel::u64>(k.hinting) << 24)) * 0x9e3779b97f4a7c15ULL;
+                  (static_cast<keel::u64>(k.flags) << 24)) * 0x9e3779b97f4a7c15ULL;
             h ^= h >> 33;
             return h * 0xff51afd7ed558ccdULL;
         }
@@ -543,11 +584,14 @@ struct GlEs3Canvas::Impl {
 
     GLuint whiteTex{0};
     GLuint atlasTex{0};
+    GLuint atlasLcdTex{0};
     GLuint transientPixelsTex{0};
     keel::u32 transientTexW{0};
     keel::u32 transientTexH{0};
 
     GLuint activeTex{0};
+    bool activeLcdBlend{false};
+    keel::u32 activeLcdRgbKey{0u};
     keel::Array<QuadInstance> quadBatch;
     keel::Array<TriVertex> triBatch;
 
@@ -566,6 +610,12 @@ struct GlEs3Canvas::Impl {
     keel::u32 shelfX{1};
     keel::u32 shelfY{1};
     keel::u32 shelfH{0};
+
+    keel::HashMap<AtlasKey, AtlasGlyph, AtlasKeyHash> atlasLcdMap;
+    keel::u32 lcdShelfX{1};
+    keel::u32 lcdShelfY{1};
+    keel::u32 lcdShelfH{0};
+    keel::Array<keel::u8> lcdUploadScratch;
 #endif
 
     [[nodiscard]] float EffScale() const noexcept { return scale * xfScale; }
@@ -749,6 +799,7 @@ struct GlEs3Canvas::Impl {
         ReleaseGpuPassCaches();
         ReleaseImageCache();
         if (transientPixelsTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &transientPixelsTex);
+        if (atlasLcdTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &atlasLcdTex);
         if (atlasTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &atlasTex);
         if (whiteTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &whiteTex);
         if (passQuadVbo != 0u && gl.DeleteBuffers) gl.DeleteBuffers(1, &passQuadVbo);
@@ -759,7 +810,7 @@ struct GlEs3Canvas::Impl {
         if (triVao != 0u && gl.DeleteVertexArrays) gl.DeleteVertexArrays(1, &triVao);
         if (quadProg != 0u && gl.DeleteProgram) gl.DeleteProgram(quadProg);
         if (triProg != 0u && gl.DeleteProgram) gl.DeleteProgram(triProg);
-        transientPixelsTex = atlasTex = whiteTex = 0u;
+        transientPixelsTex = atlasLcdTex = atlasTex = whiteTex = 0u;
         passQuadVbo = passQuadVao = quadInstanceVbo = quadVao = triVbo = triVao = 0u;
         quadProg = triProg = 0u;
         initialized = false;
@@ -877,6 +928,14 @@ struct GlEs3Canvas::Impl {
     void FlushQuads() {
         if (!initialized || quadBatch.empty()) return;
 
+        if (activeLcdBlend) {
+            const float cr = static_cast<float>(activeLcdRgbKey & 0xFFu) / 255.0f;
+            const float cg = static_cast<float>((activeLcdRgbKey >> 8) & 0xFFu) / 255.0f;
+            const float cb = static_cast<float>((activeLcdRgbKey >> 16) & 0xFFu) / 255.0f;
+            gl.BlendColor(cr, cg, cb, 1.0f);
+            gl.BlendFuncSeparate(kGlConstantColor, kGlOneMinusSrcColor, kGlOne, kGlOneMinusSrcAlpha);
+        }
+
         gl.UseProgram(quadProg);
         gl.Uniform2f(quadUniformViewport, static_cast<float>(fbWidth), static_cast<float>(fbHeight));
         gl.Uniform1i(quadUniformTex, 0);
@@ -893,6 +952,10 @@ struct GlEs3Canvas::Impl {
         gl.BufferSubData(kGlArrayBuffer, 0, static_cast<GLsizeiptr>(byteSize), quadBatch.data());
         gl.DrawArraysInstanced(kGlTriangles, 0, 6, static_cast<GLsizei>(quadBatch.size()));
         quadBatch.clear();
+
+        if (activeLcdBlend) {
+            gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+        }
     }
 
     void FlushTris() {
@@ -936,14 +999,25 @@ struct GlEs3Canvas::Impl {
         gl.Scissor(x0, keel::max(0, glY), w, h);
     }
 
-    void PushQuad(const QuadInstance& q, GLuint tex) {
+    void PushQuad(
+        const QuadInstance& q,
+        GLuint tex,
+        bool isLcd = false,
+        keel::u32 lcdRgbKey = 0u
+    ) {
         if (!initialized) return;
         if (!triBatch.empty()) {
             FlushTris();
         }
-        if (tex != 0u && tex != activeTex) {
+        const bool texChanged = (tex != 0u && tex != activeTex);
+        const bool blendChanged = (isLcd != activeLcdBlend) || (isLcd && lcdRgbKey != activeLcdRgbKey);
+        if (texChanged || blendChanged) {
             FlushQuads();
-            activeTex = tex;
+            if (tex != 0u) {
+                activeTex = tex;
+            }
+            activeLcdBlend = isLcd;
+            activeLcdRgbKey = lcdRgbKey;
         }
         quadBatch.push_back(q);
     }
@@ -969,22 +1043,54 @@ struct GlEs3Canvas::Impl {
         shelfX = 1u;
         shelfY = 1u;
         shelfH = 0u;
+        atlasLcdMap.clear();
+        lcdShelfX = 1u;
+        lcdShelfY = 1u;
+        lcdShelfH = 0u;
     }
 
-    const AtlasGlyph* ResolveAtlasGlyph(keel::u32 cp, float scaledPx, FontStyle style) {
+    bool EnsureLcdAtlas() {
+        if (atlasLcdTex != 0u) return true;
+        if (!initialized) return false;
+        gl.GenTextures(1, &atlasLcdTex);
+        if (atlasLcdTex == 0u) return false;
+        gl.BindTexture(kGlTexture2D, atlasLcdTex);
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.PixelStorei(kGlUnpackAlignment, 4);
+        keel::Array<keel::u8> zeroLcd(static_cast<keel::usize>(kLcdAtlasSize) * kLcdAtlasSize * 4u, 0u);
+        gl.TexImage2D(
+            kGlTexture2D,
+            0,
+            static_cast<GLint>(kGlRgba8),
+            static_cast<GLsizei>(kLcdAtlasSize),
+            static_cast<GLsizei>(kLcdAtlasSize),
+            0,
+            kGlRgba,
+            kGlUnsignedByte,
+            zeroLcd.data()
+        );
+        gl.BindTexture(kGlTexture2D, 0);
+        return true;
+    }
+
+    const AtlasGlyph* ResolveAtlasGlyph(keel::u32 cp, float scaledPx, FontStyle style, keel::u8 phase) {
         const keel::u16 sizeQ4 = static_cast<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
+        const keel::u8 flags = static_cast<keel::u8>((static_cast<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
         const AtlasKey key{
             .codepoint = cp,
             .sizeQ4 = sizeQ4,
             .style = static_cast<keel::u8>(style),
-            .hinting = static_cast<keel::u8>(textSettings.hinting)
+            .flags = flags
         };
         if (const AtlasGlyph* found = atlasMap.get(key)) {
             return found;
         }
 
         FreeTypeTextEngine::RasterizedGlyph rg{};
-        if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/false, 0u, rg)) {
+        if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/false, phase, rg)) {
             return nullptr;
         }
 
@@ -1006,7 +1112,11 @@ struct GlEs3Canvas::Impl {
                     shelfH = 0u;
                 }
                 if (shelfY + rg.height + 1u >= kAtlasSize) {
-                    ResetAtlas();
+                    FlushQuads();
+                    atlasMap.clear();
+                    shelfX = 1u;
+                    shelfY = 1u;
+                    shelfH = 0u;
                 }
 
                 const keel::u32 gx = shelfX;
@@ -1038,6 +1148,110 @@ struct GlEs3Canvas::Impl {
 
         atlasMap.put(key, ag);
         return atlasMap.get(key);
+    }
+
+    const AtlasGlyph* ResolveLcdAtlasGlyph(keel::u32 cp, float scaledPx, FontStyle style, keel::u8 phase) {
+        if (!EnsureLcdAtlas()) {
+            return nullptr;
+        }
+        const keel::u16 sizeQ4 = static_cast<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
+        const keel::u8 flags = static_cast<keel::u8>((static_cast<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
+        const AtlasKey key{
+            .codepoint = cp,
+            .sizeQ4 = sizeQ4,
+            .style = static_cast<keel::u8>(style),
+            .flags = flags
+        };
+        if (const AtlasGlyph* found = atlasLcdMap.get(key)) {
+            return found;
+        }
+
+        FreeTypeTextEngine::RasterizedGlyph rg{};
+        if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/true, phase, rg)) {
+            return nullptr;
+        }
+
+        AtlasGlyph ag{};
+        ag.width = rg.width;
+        ag.height = rg.height;
+        ag.bearingX = rg.bearingX;
+        ag.bearingY = rg.bearingY;
+        ag.advancePx = rg.advancePx;
+        ag.empty = rg.empty || !rg.bitmap || rg.width == 0u || rg.height == 0u;
+
+        if (!ag.empty) {
+            if (rg.width + 2u >= kLcdAtlasSize || rg.height + 2u >= kLcdAtlasSize) {
+                ag.empty = true;
+            } else {
+                if (lcdShelfX + rg.width + 1u >= kLcdAtlasSize) {
+                    lcdShelfX = 1u;
+                    lcdShelfY += lcdShelfH + 1u;
+                    lcdShelfH = 0u;
+                }
+                if (lcdShelfY + rg.height + 1u >= kLcdAtlasSize) {
+                    FlushQuads();
+                    atlasLcdMap.clear();
+                    lcdShelfX = 1u;
+                    lcdShelfY = 1u;
+                    lcdShelfH = 0u;
+                }
+
+                const keel::u32 gx = lcdShelfX;
+                const keel::u32 gy = lcdShelfY;
+                lcdShelfX += rg.width + 1u;
+                lcdShelfH = keel::max(lcdShelfH, static_cast<keel::u32>(rg.height));
+
+                const keel::usize numPx = static_cast<keel::usize>(rg.width) * rg.height;
+                lcdUploadScratch.resize(numPx * 4u);
+                if (rg.isSubpixel) {
+                    for (keel::u32 y = 0u; y < rg.height; ++y) {
+                        const keel::u8* srcRow = rg.bitmap + static_cast<keel::usize>(y) * rg.strideBytes;
+                        keel::u8* dstRow = lcdUploadScratch.data() + static_cast<keel::usize>(y) * rg.width * 4u;
+                        for (keel::u32 x = 0u; x < rg.width; ++x) {
+                            dstRow[x * 4u + 0u] = srcRow[x * 3u + 0u];
+                            dstRow[x * 4u + 1u] = srcRow[x * 3u + 1u];
+                            dstRow[x * 4u + 2u] = srcRow[x * 3u + 2u];
+                            dstRow[x * 4u + 3u] = 255u;
+                        }
+                    }
+                } else {
+                    for (keel::u32 y = 0u; y < rg.height; ++y) {
+                        const keel::u8* srcRow = rg.bitmap + static_cast<keel::usize>(y) * rg.strideBytes;
+                        keel::u8* dstRow = lcdUploadScratch.data() + static_cast<keel::usize>(y) * rg.width * 4u;
+                        for (keel::u32 x = 0u; x < rg.width; ++x) {
+                            const keel::u8 c = srcRow[x];
+                            dstRow[x * 4u + 0u] = c;
+                            dstRow[x * 4u + 1u] = c;
+                            dstRow[x * 4u + 2u] = c;
+                            dstRow[x * 4u + 3u] = 255u;
+                        }
+                    }
+                }
+
+                gl.BindTexture(kGlTexture2D, atlasLcdTex);
+                gl.PixelStorei(kGlUnpackAlignment, 4);
+                gl.TexSubImage2D(
+                    kGlTexture2D,
+                    0,
+                    static_cast<GLint>(gx),
+                    static_cast<GLint>(gy),
+                    static_cast<GLsizei>(rg.width),
+                    static_cast<GLsizei>(rg.height),
+                    kGlRgba,
+                    kGlUnsignedByte,
+                    lcdUploadScratch.data()
+                );
+
+                const float inv = 1.0f / static_cast<float>(kLcdAtlasSize);
+                ag.u0 = static_cast<float>(gx) * inv;
+                ag.v0 = static_cast<float>(gy) * inv;
+                ag.u1 = static_cast<float>(gx + rg.width) * inv;
+                ag.v1 = static_cast<float>(gy + rg.height) * inv;
+            }
+        }
+
+        atlasLcdMap.put(key, ag);
+        return atlasLcdMap.get(key);
     }
 #endif
 };
@@ -1113,6 +1327,8 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, float scale) {
     m_impl->clipStack.clear();
     m_impl->quadBatch.clear();
     m_impl->triBatch.clear();
+    m_impl->activeLcdBlend = false;
+    m_impl->activeLcdRgbKey = 0u;
     m_impl->activeGpuPassesThisFrame = 0u;
     ++m_impl->frameCounter;
 
@@ -1308,11 +1524,30 @@ void GlEs3Canvas::DrawTextStyled(
     const float cosA = hasRot ? keel::cos(rad) : 1.0f;
     const float sinA = hasRot ? keel::sin(rad) : 0.0f;
 
+    const FontSmoothing effSmooth = hasRot
+        ? FontSmoothing::Grayscale
+        : TextCompositor::ResolveEffectiveSmoothing(m_impl->textSettings.smoothing, eff);
+    const bool useLcd = (!hasRot && (effSmooth == FontSmoothing::SubpixelRGB || effSmooth == FontSmoothing::SubpixelBGR));
+    const bool bgrOrder = (effSmooth == FontSmoothing::SubpixelBGR);
+    const bool useSubPhase = (!hasRot && m_impl->textSettings.hinting != FontHinting::Normal);
+
+    const float clampedContrast = keel::clamp(m_impl->textSettings.contrast, 0.5f, 2.0f);
+    const float invContrast = 1.0f / clampedContrast;
+    const float sizeFactor = keel::clamp((28.0f - scaledPx) / 16.0f, 0.0f, 1.0f);
+    const float effDarken = keel::clamp(m_impl->textSettings.stemDarkening, 0.0f, 0.5f) * sizeFactor;
+    const float gammaFlag = m_impl->textSettings.gammaCorrectBlending ? 1.0f : 0.0f;
+
+    const float glyphMode = useLcd
+        ? (bgrOrder ? kModeGlyphLcdBgr : kModeGlyphLcdRgb)
+        : kModeGlyphR8;
+    const keel::u32 lcdRgbKey = static_cast<keel::u32>(color.r) |
+                                (static_cast<keel::u32>(color.g) << 8) |
+                                (static_cast<keel::u32>(color.b) << 16);
+
     float penX = hasRot ? 0.0f : originPx.x;
     const float baselineY = hasRot ? fm.ascentPx : keel::round(originPx.y + fm.ascentPx);
     const float pivotX = hasRot ? originPx.x : 0.0f;
     const float pivotY = hasRot ? originPx.y : 0.0f;
-    const float stemBoost = keel::clamp(m_impl->textSettings.stemDarkening, 0.0f, 0.5f);
 
     keel::u32 prevCp = 0u;
     keel::usize offset = 0u;
@@ -1320,7 +1555,7 @@ void GlEs3Canvas::DrawTextStyled(
         const keel::u32 cp = keel::utf8_decode_next(text, offset);
         if (cp == '\n' || cp == '\r') continue;
         if (cp == '\t') {
-            if (const auto* sp = m_impl->ResolveAtlasGlyph(static_cast<keel::u32>(' '), scaledPx, style)) {
+            if (const auto* sp = m_impl->ResolveAtlasGlyph(static_cast<keel::u32>(' '), scaledPx, style, 0u)) {
                 penX += (sp->advancePx > 0.0f) ? (sp->advancePx * 4.0f) : (scaledPx * 2.4f);
             } else {
                 penX += scaledPx * 2.4f;
@@ -1332,22 +1567,37 @@ void GlEs3Canvas::DrawTextStyled(
             penX += m_impl->ft.GetKerningPx(prevCp, cp, scaledPx, style, m_impl->textSettings.hinting);
         }
 
-        const auto* ag = m_impl->ResolveAtlasGlyph(cp, scaledPx, style);
+        float cellX = penX;
+        keel::u8 phase = 0u;
+        if (!hasRot) {
+            if (useSubPhase) {
+                const keel::i32 qx = keel::round_i32(penX * 4.0f);
+                cellX = static_cast<float>(qx >> 2);
+                phase = static_cast<keel::u8>(qx & 3);
+            } else {
+                cellX = keel::round(penX);
+            }
+        }
+
+        const Impl::AtlasGlyph* ag = useLcd
+            ? m_impl->ResolveLcdAtlasGlyph(cp, scaledPx, style, phase)
+            : m_impl->ResolveAtlasGlyph(cp, scaledPx, style, phase);
         if (!ag) {
             prevCp = cp;
             continue;
         }
 
         if (!ag->empty) {
-            const float gx = (hasRot ? penX : keel::round(penX)) + static_cast<float>(ag->bearingX);
+            const float gx = cellX + static_cast<float>(ag->bearingX);
             const float gy = baselineY - static_cast<float>(ag->bearingY);
+            const GLuint tex = useLcd ? m_impl->atlasLcdTex : m_impl->atlasTex;
             m_impl->PushQuad(QuadInstance{
                 gx, gy, static_cast<float>(ag->width), static_cast<float>(ag->height),
                 ag->u0, ag->v0, ag->u1, ag->v1,
                 color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
-                pivotX, pivotY, 0.0f, 0.0f,
-                cosA, sinA, kModeGlyphR8, stemBoost
-            }, m_impl->atlasTex);
+                pivotX, pivotY, invContrast, gammaFlag,
+                cosA, sinA, glyphMode, effDarken
+            }, tex, useLcd, lcdRgbKey);
         }
         penX += ag->advancePx;
         prevCp = cp;
@@ -1975,6 +2225,7 @@ void GlEs3Canvas::TrimCaches() noexcept {
     if (!m_impl) return;
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     m_impl->ft.TrimCaches();
+    m_impl->lcdUploadScratch = {};
 #endif
     m_impl->gpuRgbaScratch = {};
     if (m_impl->quadBatch.empty() && m_impl->quadBatch.capacity() > 4096u) {
@@ -2027,7 +2278,7 @@ void GlEs3Canvas::TrimCaches() noexcept {
 
 keel::StringRef GlEs3Canvas::GetTextEngineName() const noexcept {
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
-    return "FreeType (GPU Atlas)";
+    return "FreeType (GPU Atlas + LCD)";
 #else
     return "None";
 #endif

@@ -162,6 +162,30 @@ void main() {
                     .dashOffPx = 4.0f
                 });
                 glCanvas.DrawTextStyled("Vertical -90", {20.0f, 200.0f}, 14.0f, Color(255, 255, 255), FontStyle::Bold, -90.0f);
+
+                // Verify production text rendering settings (LCD RGB/BGR, Grayscale, contrast, stemDarkening, gamma)
+                TextRenderSettings trs{};
+                trs.smoothing = FontSmoothing::SubpixelRGB;
+                trs.hinting = FontHinting::Light;
+                trs.gammaCorrectBlending = true;
+                trs.contrast = 1.35f;
+                trs.stemDarkening = 0.25f;
+                glCanvas.SetTextRenderSettings(trs);
+                glCanvas.DrawTextStyled("Subpixel RGB + Contrast + Gamma", {20.0f, 220.0f}, 13.0f, Color(248, 250, 252), FontStyle::Regular, 0.0f);
+
+                trs.smoothing = FontSmoothing::SubpixelBGR;
+                trs.contrast = 0.85f;
+                trs.stemDarkening = 0.40f;
+                glCanvas.SetTextRenderSettings(trs);
+                glCanvas.DrawTextStyled("Subpixel BGR + Stem Darkening", {20.0f, 240.0f}, 13.0f, Color(15, 23, 42), FontStyle::Monospace, 0.0f);
+
+                trs.smoothing = FontSmoothing::Grayscale;
+                trs.gammaCorrectBlending = false;
+                trs.contrast = 1.0f;
+                trs.stemDarkening = 0.15f;
+                glCanvas.SetTextRenderSettings(trs);
+                glCanvas.DrawTextStyled("Grayscale Linear", {20.0f, 260.0f}, 13.0f, Color(220, 230, 240), FontStyle::Italic, 0.0f);
+
                 CHECK(glCanvas.DrawImage("assets/guikit-icon-inter850-1024.png", Rect(20.0f, 100.0f, 48.0f, 48.0f), 8.0f, 255));
                 CHECK(glCanvas.DrawPixels({samplePixels, 16u, 16u}, Rect(100.0f, 100.0f, 48.0f, 48.0f), 6.0f, 255));
                 glCanvas.End();

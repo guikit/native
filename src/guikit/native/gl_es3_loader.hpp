@@ -40,8 +40,10 @@ static constexpr GLenum kGlCullFace = 0x0B44u;
 static constexpr GLenum kGlUnpackAlignment = 0x0CF5u;
 
 static constexpr GLenum kGlOne = 1u;
+static constexpr GLenum kGlOneMinusSrcColor = 0x0301u;
 static constexpr GLenum kGlSrcAlpha = 0x0302u;
 static constexpr GLenum kGlOneMinusSrcAlpha = 0x0303u;
+static constexpr GLenum kGlConstantColor = 0x8001u;
 static constexpr GLenum kGlFuncAdd = 0x8006u;
 
 static constexpr GLenum kGlTexture2D = 0x0DE1u;
@@ -86,6 +88,7 @@ struct GlEs3Api {
     using PfnClearColor = void(GUIKIT_GL_APIENTRY*)(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
     using PfnClear = void(GUIKIT_GL_APIENTRY*)(GLbitfield mask);
     using PfnBlendFuncSeparate = void(GUIKIT_GL_APIENTRY*)(GLenum sRGB, GLenum dRGB, GLenum sAlpha, GLenum dAlpha);
+    using PfnBlendColor = void(GUIKIT_GL_APIENTRY*)(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
     using PfnBlendEquation = void(GUIKIT_GL_APIENTRY*)(GLenum mode);
     using PfnPixelStorei = void(GUIKIT_GL_APIENTRY*)(GLenum pname, GLint param);
 
@@ -146,6 +149,7 @@ struct GlEs3Api {
     PfnClearColor ClearColor{nullptr};
     PfnClear Clear{nullptr};
     PfnBlendFuncSeparate BlendFuncSeparate{nullptr};
+    PfnBlendColor BlendColor{nullptr};
     PfnBlendEquation BlendEquation{nullptr};
     PfnPixelStorei PixelStorei{nullptr};
 
@@ -236,6 +240,7 @@ struct GlEs3Api {
         ok = LoadFn(procLoader, "glClearColor", ClearColor) && ok;
         ok = LoadFn(procLoader, "glClear", Clear) && ok;
         ok = LoadFn(procLoader, "glBlendFuncSeparate", BlendFuncSeparate) && ok;
+        ok = LoadFn(procLoader, "glBlendColor", BlendColor) && ok;
         ok = LoadFn(procLoader, "glBlendEquation", BlendEquation) && ok;
         ok = LoadFn(procLoader, "glPixelStorei", PixelStorei) && ok;
 
