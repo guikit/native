@@ -6,6 +6,7 @@ if (PROJECT_IS_TOP_LEVEL)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
+option(GUIKIT_NATIVE_BUILD_EXAMPLES "Build GuiKit Native minimal example application" ${PROJECT_IS_TOP_LEVEL})
 option(GUIKIT_NATIVE_BUILD_TESTS "Build GuiKit Native unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(GUIKIT_NATIVE_INSTALL "Enable CMake install targets for guikit_native" ${PROJECT_IS_TOP_LEVEL})
 
@@ -32,6 +33,8 @@ else()
 endif()
 
 add_library(guikit_native STATIC
+    src/guikit/native/gl_es3_canvas.cpp
+    src/guikit/native/x11_platform_window.cpp
     src/guikit/native/native_backend.cpp
 )
 add_library(guikit::native ALIAS guikit_native)
@@ -42,17 +45,31 @@ target_include_directories(guikit_native PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_ES3=1)
+if (UNIX AND NOT APPLE AND NOT ANDROID AND NOT EMSCRIPTEN)
+    target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_X11=1)
+endif()
 target_link_libraries(guikit_native PUBLIC guikit::core)
 if (GUIKIT_NATIVE_HAS_TEXT AND TARGET guikit::text)
     target_link_libraries(guikit_native PUBLIC guikit::text)
 endif()
 
-if (COMMAND guikit_enforce_guidelines)
-    guikit_enforce_guidelines(guikit_native
+if (COMMAND keel_enforce_guidelines)
+    keel_enforce_guidelines(guikit_native
         HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include"
         STANDALONE_HEADERS ${GUIKIT_NATIVE_BUILD_TESTS}
         TEST_NAME guikit_native_header_purity_scan
     )
+endif()
+
+if (GUIKIT_NATIVE_BUILD_EXAMPLES AND NOT EMSCRIPTEN)
+    add_executable(guikit_native_minimal
+        examples/minimal/main.cpp
+    )
+    target_link_libraries(guikit_native_minimal PRIVATE guikit::native)
+    if (COMMAND guikit_enforce_guidelines)
+        guikit_enforce_guidelines(guikit_native_minimal)
+    endif()
 endif()
 
 if (GUIKIT_NATIVE_INSTALL)
