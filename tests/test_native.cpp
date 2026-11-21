@@ -1,4 +1,6 @@
 #include "guikit/native.hpp"
+#include "guikit/backend/vector_backend.hpp"
+#include "guikit/core/assets.hpp"
 #include "keel/keel.h"
 #include "keel/math.h"
 
@@ -37,6 +39,26 @@ int main() {
         uninitCanvas.End();
     }
 
+    // 2.5. Pure 0BSD PNG decoder registered via RegisterNativeWindowBackend
+    {
+        RegisterNativeWindowBackend();
+        const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png");
+        CHECK(iconAsset.has_value() && !iconAsset->Empty());
+        if (iconAsset && !iconAsset->Empty()) {
+            keel::u32 w = 0u;
+            keel::u32 h = 0u;
+            keel::Array<keel::u32> rgba;
+            CHECK(DecodeImageFromMemory(iconAsset->Bytes(), w, h, rgba));
+            CHECK(w == 1024u && h == 1024u);
+            CHECK(rgba.size() == 1024u * 1024u);
+            keel::u32 nonZero = 0u;
+            for (keel::usize i = 0u; i < rgba.size(); i += 257u) {
+                if ((rgba[i] >> 24) > 0u) ++nonZero;
+            }
+            CHECK(nonZero > 100u);
+        }
+    }
+
     // 3. Live X11 + EGL + OpenGL ES 3.0 smoke test when an X11 display & EGL driver are available
     if (X11PlatformWindow::IsRuntimeAvailable()) {
         keel::println("  -> Live X11 + EGL runtime detected; verifying GlEs3Canvas shader compile & full UI frame...");
@@ -62,11 +84,36 @@ int main() {
             keel::println("     GL Renderer: {}", glCanvas.GetGlRendererString());
             keel::println("     Text Engine: {}", glCanvas.GetTextEngineName());
 
-            // Measure text & render full immediate-mode UI frame + custom path + pixels
+            // Measure text & render full immediate-mode UI frame + custom path + pixels + image + GPU shader pass
             const Vec2 tm = glCanvas.MeasureText("Hello ES3", 16.0f);
             CHECK(tm.x > 20.0f && tm.y > 10.0f);
+            CHECK(glCanvas.SupportsGpuShaders());
+
+            const Vec2 iconSize = glCanvas.GetImageSize("assets/guikit-icon-inter850-1024.png");
+            CHECK(keel::abs(iconSize.x - 1024.0f) < 0.5f && keel::abs(iconSize.y - 1024.0f) < 0.5f);
 
             keel::Array<keel::u32> samplePixels(16u * 16u, 0xFF38BDF8u);
+            keel::Array<float> gpuField(32u * 64u, 0.5f);
+            keel::Array<keel::u32> gpuLut(256u, 0xFF22D3EEu);
+
+            static constexpr keel::StringRef kTestPassFrag = R"(
+#ifdef GL_ES
+precision highp float;
+#endif
+varying vec2 v_uv;
+uniform vec2 u_GridDims;
+uniform vec3 u_BgColor;
+uniform vec4 u_Params[8];
+uniform sampler2D u_DataTex;
+uniform sampler2D u_LutTex;
+void main() {
+    vec4 d = texture2D(u_DataTex, v_uv);
+    float val = (d.r * 65280.0 + d.g * 255.0) / 65535.0;
+    vec4 col = texture2D(u_LutTex, vec2(clamp(val + u_Params[0].x, 0.0, 1.0), 0.5));
+    gl_FragColor = vec4(mix(u_BgColor, col.rgb, 0.8), 1.0);
+}
+)";
+
             VectorPath poly;
             poly.MoveTo({20.0f, 20.0f});
             poly.LineTo({60.0f, 20.0f});
@@ -85,13 +132,37 @@ int main() {
                 ui.EndFrame(glCanvas);
 
                 glCanvas.Begin(400, 300, 1.0f);
+                CHECK(!glCanvas.HasActiveGpuPasses());
+
+                ICanvas::GpuShaderPassDesc pass{};
+                pass.widgetId = 42u;
+                pass.shader = {.shaderId = "test.native.pass.v1", .glslEs2 = kTestPassFrag};
+                pass.plotRect = Rect(160.0f, 120.0f, 180.0f, 120.0f);
+                pass.bgColor = Color(8, 12, 20, 255);
+                pass.dataField = {gpuField, 32u, 64u};
+                pass.fullGeneration = 1u;
+                pass.sliceGeneration = static_cast<keel::u64>(f + 1);
+                pass.headRow = static_cast<keel::u32>(f);
+                pass.dataNormOffset = 0.0f;
+                pass.dataNormScale = 1.0f;
+                pass.colormapId = 0u;
+                pass.lutAbgr256 = gpuLut;
+                pass.params[0] = {0.1f, 0.0f, 0.0f, 0.0f};
+                CHECK(glCanvas.DrawGpuShaderPass(pass, true));
+                CHECK(glCanvas.HasActiveGpuPasses());
+
                 glCanvas.DrawPath(poly, PathPaint{
                     .fillColor = Color(56, 189, 248, 200),
                     .strokeColor = Color(255, 255, 255, 255),
                     .strokeWidthPx = 1.5f,
                     .renderFill = true,
-                    .renderStroke = true
+                    .renderStroke = true,
+                    .dashed = true,
+                    .dashOnPx = 6.0f,
+                    .dashOffPx = 4.0f
                 });
+                glCanvas.DrawTextStyled("Vertical -90", {20.0f, 200.0f}, 14.0f, Color(255, 255, 255), FontStyle::Bold, -90.0f);
+                CHECK(glCanvas.DrawImage("assets/guikit-icon-inter850-1024.png", Rect(20.0f, 100.0f, 48.0f, 48.0f), 8.0f, 255));
                 CHECK(glCanvas.DrawPixels({samplePixels, 16u, 16u}, Rect(100.0f, 100.0f, 48.0f, 48.0f), 6.0f, 255));
                 glCanvas.End();
                 x11Win->SwapBuffers();

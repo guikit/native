@@ -105,6 +105,14 @@ public:
     ) override;
     void DrawPath(const VectorPath& path, const PathPaint& paint) override;
 
+    Vec2 GetImageSize(keel::StringRef source) override;
+    bool DrawImage(
+        keel::StringRef source,
+        Rect destRect,
+        float cornerRadius = 0.0f,
+        keel::u8 opacity = 255
+    ) override;
+
     bool DrawPixels(
         PixelRef pixels,
         Rect destRect,
@@ -117,6 +125,11 @@ public:
         keel::Optional<Rect> srcRect = keel::kNullOpt,
         Color tint = Color(255, 255, 255, 255)
     ) override;
+
+    void SetGpuShadersEnabled(bool enabled) noexcept override;
+    [[nodiscard]] bool SupportsGpuShaders() const noexcept override;
+    [[nodiscard]] bool HasActiveGpuPasses() const noexcept override;
+    bool DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool punchHole = true) override;
 
     void TrimCaches() noexcept override;
 

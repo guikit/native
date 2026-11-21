@@ -46,6 +46,7 @@ static constexpr GLenum kGlFuncAdd = 0x8006u;
 
 static constexpr GLenum kGlTexture2D = 0x0DE1u;
 static constexpr GLenum kGlTexture0 = 0x84C0u;
+static constexpr GLenum kGlTexture1 = 0x84C1u;
 static constexpr GLenum kGlTextureMagFilter = 0x2800u;
 static constexpr GLenum kGlTextureMinFilter = 0x2801u;
 static constexpr GLenum kGlTextureWrapS = 0x2802u;
@@ -105,7 +106,11 @@ struct GlEs3Api {
 
     using PfnGetUniformLocation = GLint(GUIKIT_GL_APIENTRY*)(GLuint program, const GLchar* name);
     using PfnUniform1i = void(GUIKIT_GL_APIENTRY*)(GLint loc, GLint v0);
+    using PfnUniform1f = void(GUIKIT_GL_APIENTRY*)(GLint loc, GLfloat v0);
     using PfnUniform2f = void(GUIKIT_GL_APIENTRY*)(GLint loc, GLfloat v0, GLfloat v1);
+    using PfnUniform3f = void(GUIKIT_GL_APIENTRY*)(GLint loc, GLfloat v0, GLfloat v1, GLfloat v2);
+    using PfnUniform4f = void(GUIKIT_GL_APIENTRY*)(GLint loc, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+    using PfnUniform4fv = void(GUIKIT_GL_APIENTRY*)(GLint loc, GLsizei count, const GLfloat* value);
 
     using PfnGenVertexArrays = void(GUIKIT_GL_APIENTRY*)(GLsizei n, GLuint* arrays);
     using PfnBindVertexArray = void(GUIKIT_GL_APIENTRY*)(GLuint array);
@@ -161,7 +166,11 @@ struct GlEs3Api {
 
     PfnGetUniformLocation GetUniformLocation{nullptr};
     PfnUniform1i Uniform1i{nullptr};
+    PfnUniform1f Uniform1f{nullptr};
     PfnUniform2f Uniform2f{nullptr};
+    PfnUniform3f Uniform3f{nullptr};
+    PfnUniform4f Uniform4f{nullptr};
+    PfnUniform4fv Uniform4fv{nullptr};
 
     PfnGenVertexArrays GenVertexArrays{nullptr};
     PfnBindVertexArray BindVertexArray{nullptr};
@@ -247,7 +256,11 @@ struct GlEs3Api {
 
         ok = LoadFn(procLoader, "glGetUniformLocation", GetUniformLocation) && ok;
         ok = LoadFn(procLoader, "glUniform1i", Uniform1i) && ok;
+        ok = LoadFn(procLoader, "glUniform1f", Uniform1f) && ok;
         ok = LoadFn(procLoader, "glUniform2f", Uniform2f) && ok;
+        ok = LoadFn(procLoader, "glUniform3f", Uniform3f) && ok;
+        ok = LoadFn(procLoader, "glUniform4f", Uniform4f) && ok;
+        ok = LoadFn(procLoader, "glUniform4fv", Uniform4fv) && ok;
 
         ok = LoadFn(procLoader, "glGenVertexArrays", GenVertexArrays) && ok;
         ok = LoadFn(procLoader, "glBindVertexArray", BindVertexArray) && ok;

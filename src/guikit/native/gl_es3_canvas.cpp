@@ -1,6 +1,8 @@
 #include "guikit/native/gl_es3_canvas.hpp"
 
 #include "gl_es3_loader.hpp"
+#include "png_decoder.hpp"
+#include "guikit/backend/vector_backend.hpp"
 #include "guikit/core/assets.hpp"
 #include "guikit/core/text_util.hpp"
 #include "guikit/core/tokens.hpp"
@@ -68,10 +70,19 @@ void main() {
     else                       corner = vec2(0.0, 1.0);
 
     float mode = a_Params.z;
-    float pad = (mode < 1.5) ? 1.5 : 0.0;
-    vec2 rectMin = a_Rect.xy - vec2(pad);
-    vec2 rectSize = a_Rect.zw + vec2(pad * 2.0);
-    vec2 posPx = rectMin + corner * rectSize;
+    vec2 posPx;
+    if (mode > 2.5) {
+        // Mode 3 (GlyphR8): a_Rect=(localX,localY,w,h), a_Stroke.xy=pivotPx, a_Params.xy=(cosA,sinA)
+        vec2 pLocal = a_Rect.xy + corner * a_Rect.zw;
+        vec2 rot = vec2(pLocal.x * a_Params.x - pLocal.y * a_Params.y,
+                        pLocal.x * a_Params.y + pLocal.y * a_Params.x);
+        posPx = a_Stroke.xy + rot;
+    } else {
+        float pad = (mode < 1.5) ? 1.5 : 0.0;
+        vec2 rectMin = a_Rect.xy - vec2(pad);
+        vec2 rectSize = a_Rect.zw + vec2(pad * 2.0);
+        posPx = rectMin + corner * rectSize;
+    }
 
     vec2 center = a_Rect.xy + a_Rect.zw * 0.5;
     v_HalfSize = a_Rect.zw * 0.5;
@@ -205,6 +216,105 @@ void main() {
     FragColor = v_Color;
 }
 )GLSL";
+
+static constexpr const char* kPassVertBody = R"GLSL(
+layout(location = 0) in vec2 a_uv;
+out vec2 v_uv;
+
+uniform vec2 u_Viewport;
+uniform vec4 u_PlotRect;
+
+void main() {
+    v_uv = a_uv;
+    vec2 screenPos = u_PlotRect.xy + a_uv * u_PlotRect.zw;
+    vec2 ndc = vec2(
+        (screenPos.x / max(u_Viewport.x, 1.0)) * 2.0 - 1.0,
+        1.0 - (screenPos.y / max(u_Viewport.y, 1.0)) * 2.0
+    );
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+)GLSL";
+
+[[nodiscard]] inline keel::u32 PackRG16Norm(float norm) noexcept {
+    const float clamped = keel::clamp(norm, 0.0f, 1.0f);
+    const keel::u32 q = static_cast<keel::u32>(keel::round_i32(clamped * 65535.0f));
+    const keel::u32 hi = (q >> 8) & 0xFFu;
+    const keel::u32 lo = q & 0xFFu;
+    return hi | (lo << 8) | 0xFF000000u;
+}
+
+[[nodiscard]] GLuint CompileGpuPassProgram(
+    const GlEs3Api& gl,
+    bool isDesktopGl,
+    keel::StringRef glslEs2Frag
+) {
+    const char* vsHeader = isDesktopGl
+        ? "#version 330 core\n"
+        : "#version 300 es\nprecision highp float;\n";
+    const GLchar* vsSources[2] = {vsHeader, kPassVertBody};
+    GLuint vs = gl.CreateShader(kGlVertexShader);
+    if (vs == 0u) return 0u;
+    gl.ShaderSource(vs, 2, vsSources, nullptr);
+    gl.CompileShader(vs);
+    GLint status = 0;
+    gl.GetShaderiv(vs, kGlCompileStatus, &status);
+    if (status == 0) {
+        gl.DeleteShader(vs);
+        return 0u;
+    }
+
+    const char* fsPreamble = isDesktopGl
+        ? "#version 330 core\n"
+          "#define varying in\n"
+          "#define texture2D texture\n"
+          "#define gl_FragColor guikit_FragColor\n"
+          "out vec4 guikit_FragColor;\n"
+        : "#version 300 es\n"
+          "precision highp float;\n"
+          "#define varying in\n"
+          "#define texture2D texture\n"
+          "#define gl_FragColor guikit_FragColor\n"
+          "out vec4 guikit_FragColor;\n";
+    const GLchar* fsSources[2] = {fsPreamble, glslEs2Frag.data()};
+    const GLint fsLengths[2] = {-1, static_cast<GLint>(glslEs2Frag.size())};
+    GLuint fs = gl.CreateShader(kGlFragmentShader);
+    if (fs == 0u) {
+        gl.DeleteShader(vs);
+        return 0u;
+    }
+    gl.ShaderSource(fs, 2, fsSources, fsLengths);
+    gl.CompileShader(fs);
+    status = 0;
+    gl.GetShaderiv(fs, kGlCompileStatus, &status);
+    if (status == 0) {
+        char logBuf[512]{};
+        GLsizei logLen = 0;
+        gl.GetShaderInfoLog(fs, static_cast<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
+        keel::eprintln("[GlEs3Canvas] GPU pass frag compile failed: {}", keel::StringRef(logBuf, static_cast<keel::usize>(keel::max(0, logLen))));
+        gl.DeleteShader(vs);
+        gl.DeleteShader(fs);
+        return 0u;
+    }
+
+    GLuint prog = gl.CreateProgram();
+    gl.AttachShader(prog, vs);
+    gl.AttachShader(prog, fs);
+    gl.LinkProgram(prog);
+    gl.DeleteShader(vs);
+    gl.DeleteShader(fs);
+
+    status = 0;
+    gl.GetProgramiv(prog, kGlLinkStatus, &status);
+    if (status == 0) {
+        char logBuf[512]{};
+        GLsizei logLen = 0;
+        gl.GetProgramInfoLog(prog, static_cast<GLsizei>(sizeof(logBuf) - 1), &logLen, logBuf);
+        keel::eprintln("[GlEs3Canvas] GPU pass link failed: {}", keel::StringRef(logBuf, static_cast<keel::usize>(keel::max(0, logLen))));
+        gl.DeleteProgram(prog);
+        return 0u;
+    }
+    return prog;
+}
 
 [[nodiscard]] GLuint CompileShader(
     const GlEs3Api& gl,
@@ -388,6 +498,46 @@ struct GlEs3Canvas::Impl {
     GLuint triVbo{0};
     keel::usize triVboCapacity{0};
 
+    struct CachedImage {
+        GLuint texId{0};
+        keel::u32 width{0};
+        keel::u32 height{0};
+        bool valid{false};
+        bool probedOnly{false};
+    };
+
+    struct CompiledPassProgram {
+        GLuint program{0};
+        bool failed{false};
+        GLint locViewport{-1};
+        GLint locPlotRect{-1};
+        GLint locGridDims{-1};
+        GLint locBgColor{-1};
+        GLint locParams{-1};
+        GLint locDataTex{-1};
+        GLint locLutTex{-1};
+    };
+
+    struct WidgetGpuTextures {
+        GLuint dataTex{0};
+        keel::u32 texW{0};
+        keel::u32 texH{0};
+        keel::u64 fullGen{0};
+        keel::u64 sliceGen{0};
+        GLuint lutTex{0};
+        keel::u8 lutId{255};
+        bool lutUploaded{false};
+    };
+
+    GLuint passQuadVao{0};
+    GLuint passQuadVbo{0};
+    bool gpuShadersEnabled{true};
+    keel::u32 activeGpuPassesThisFrame{0};
+    keel::HashMap<keel::String, CompiledPassProgram> gpuPrograms;
+    keel::HashMap<keel::u64, WidgetGpuTextures> gpuWidgetTex;
+    keel::Array<keel::u32> gpuRgbaScratch;
+    keel::HashMap<keel::String, CachedImage> imageCache;
+
     GLuint whiteTex{0};
     GLuint atlasTex{0};
     GLuint transientPixelsTex{0};
@@ -488,6 +638,19 @@ struct GlEs3Canvas::Impl {
         gl.VertexAttribPointer(0, 2, kGlFloat, kGlFalse, static_cast<GLsizei>(sizeof(TriVertex)), reinterpret_cast<const void*>(0));
         gl.EnableVertexAttribArray(1);
         gl.VertexAttribPointer(1, 4, kGlFloat, kGlFalse, static_cast<GLsizei>(sizeof(TriVertex)), reinterpret_cast<const void*>(2u * sizeof(float)));
+
+        // Setup GPU Shader Pass unit-quad VAO + VBO
+        static constexpr float kUnitQuadUvs[12] = {
+            0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f,
+            0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f
+        };
+        gl.GenVertexArrays(1, &passQuadVao);
+        gl.GenBuffers(1, &passQuadVbo);
+        gl.BindVertexArray(passQuadVao);
+        gl.BindBuffer(kGlArrayBuffer, passQuadVbo);
+        gl.BufferData(kGlArrayBuffer, static_cast<GLsizeiptr>(sizeof(kUnitQuadUvs)), kUnitQuadUvs, kGlStaticDraw);
+        gl.EnableVertexAttribArray(0);
+        gl.VertexAttribPointer(0, 2, kGlFloat, kGlFalse, static_cast<GLsizei>(2u * sizeof(float)), reinterpret_cast<const void*>(0));
         gl.BindVertexArray(0);
 
         // 1x1 white fallback texture
@@ -534,13 +697,59 @@ struct GlEs3Canvas::Impl {
         return true;
     }
 
+    void ReleaseGpuPassCaches() noexcept {
+        if (gl.DeleteProgram) {
+            for (auto [k, p] : gpuPrograms) {
+                (void)k;
+                if (p.program != 0u) {
+                    gl.DeleteProgram(p.program);
+                    p.program = 0u;
+                }
+            }
+        }
+        gpuPrograms.clear();
+
+        if (gl.DeleteTextures) {
+            for (auto [k, wt] : gpuWidgetTex) {
+                (void)k;
+                if (wt.dataTex != 0u) {
+                    gl.DeleteTextures(1, &wt.dataTex);
+                    wt.dataTex = 0u;
+                }
+                if (wt.lutTex != 0u) {
+                    gl.DeleteTextures(1, &wt.lutTex);
+                    wt.lutTex = 0u;
+                }
+            }
+        }
+        gpuWidgetTex.clear();
+        gpuRgbaScratch.clear();
+    }
+
+    void ReleaseImageCache() noexcept {
+        if (gl.DeleteTextures) {
+            for (auto [k, img] : imageCache) {
+                (void)k;
+                if (img.texId != 0u) {
+                    gl.DeleteTextures(1, &img.texId);
+                    img.texId = 0u;
+                }
+            }
+        }
+        imageCache.clear();
+    }
+
     void Shutdown() noexcept {
         if (!initialized && quadProg == 0u && triProg == 0u) {
             return;
         }
+        ReleaseGpuPassCaches();
+        ReleaseImageCache();
         if (transientPixelsTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &transientPixelsTex);
         if (atlasTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &atlasTex);
         if (whiteTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &whiteTex);
+        if (passQuadVbo != 0u && gl.DeleteBuffers) gl.DeleteBuffers(1, &passQuadVbo);
+        if (passQuadVao != 0u && gl.DeleteVertexArrays) gl.DeleteVertexArrays(1, &passQuadVao);
         if (quadInstanceVbo != 0u && gl.DeleteBuffers) gl.DeleteBuffers(1, &quadInstanceVbo);
         if (quadVao != 0u && gl.DeleteVertexArrays) gl.DeleteVertexArrays(1, &quadVao);
         if (triVbo != 0u && gl.DeleteBuffers) gl.DeleteBuffers(1, &triVbo);
@@ -548,9 +757,118 @@ struct GlEs3Canvas::Impl {
         if (quadProg != 0u && gl.DeleteProgram) gl.DeleteProgram(quadProg);
         if (triProg != 0u && gl.DeleteProgram) gl.DeleteProgram(triProg);
         transientPixelsTex = atlasTex = whiteTex = 0u;
-        quadInstanceVbo = quadVao = triVbo = triVao = 0u;
+        passQuadVbo = passQuadVao = quadInstanceVbo = quadVao = triVbo = triVao = 0u;
         quadProg = triProg = 0u;
         initialized = false;
+    }
+
+    CachedImage* ResolveImage(keel::StringRef source, bool requireTexture) {
+        if (source.empty()) return nullptr;
+        if (CachedImage* existing = imageCache.get(source)) {
+            if (!existing->valid || !requireTexture || existing->texId != 0u) {
+                return existing;
+            }
+        }
+
+        keel::Array<keel::u8> ownedBytes;
+        keel::ArrayRef<keel::u8> bytes{};
+        if (const auto asset = Assets::Find(source); asset && !asset->Empty()) {
+            bytes = asset->Bytes();
+        } else if (auto fileBytes = keel::fs_read_file(source)) {
+            ownedBytes = keel::move(*fileBytes);
+            bytes = ownedBytes.as_ref();
+        } else {
+            CachedImage invalid{};
+            invalid.valid = false;
+            imageCache.put(keel::String::from(source), invalid);
+            return imageCache.get(source);
+        }
+
+        if (!requireTexture) {
+            keel::u32 w = 0u;
+            keel::u32 h = 0u;
+            if (InspectPngDimensions(bytes, w, h)) {
+                CachedImage probed{};
+                probed.width = w;
+                probed.height = h;
+                probed.valid = true;
+                probed.probedOnly = true;
+                imageCache.put(keel::String::from(source), probed);
+                return imageCache.get(source);
+            }
+        }
+
+        keel::u32 w = 0u;
+        keel::u32 h = 0u;
+        keel::Array<keel::u32> rgba;
+        bool decoded = DecodeImageFromMemory(bytes, w, h, rgba);
+        if (!decoded) {
+            decoded = DecodePngFromMemory(bytes, w, h, rgba);
+        }
+        if (!decoded || w == 0u || h == 0u || rgba.size() < static_cast<keel::usize>(w) * h) {
+            CachedImage invalid{};
+            invalid.valid = false;
+            imageCache.put(keel::String::from(source), invalid);
+            return imageCache.get(source);
+        }
+
+        CachedImage entry{};
+        entry.width = w;
+        entry.height = h;
+        entry.valid = true;
+        entry.probedOnly = !requireTexture;
+
+        if (requireTexture && initialized) {
+            GLuint tex = 0u;
+            gl.GenTextures(1, &tex);
+            gl.BindTexture(kGlTexture2D, tex);
+            gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+            gl.PixelStorei(kGlUnpackAlignment, 4);
+            gl.TexImage2D(
+                kGlTexture2D,
+                0,
+                static_cast<GLint>(kGlRgba8),
+                static_cast<GLsizei>(w),
+                static_cast<GLsizei>(h),
+                0,
+                kGlRgba,
+                kGlUnsignedByte,
+                rgba.data()
+            );
+            gl.BindTexture(kGlTexture2D, 0);
+            entry.texId = tex;
+            entry.probedOnly = false;
+        }
+
+        imageCache.put(keel::String::from(source), entry);
+        return imageCache.get(source);
+    }
+
+    CompiledPassProgram* ResolvePassProgram(keel::StringRef shaderId, keel::StringRef glslEs2) {
+        if (CompiledPassProgram* existing = gpuPrograms.get(shaderId)) {
+            return existing;
+        }
+        CompiledPassProgram compiled{};
+        compiled.program = CompileGpuPassProgram(gl, isDesktopGl, glslEs2);
+        if (compiled.program == 0u) {
+            compiled.failed = true;
+        } else {
+            compiled.locViewport = gl.GetUniformLocation(compiled.program, "u_Viewport");
+            compiled.locPlotRect = gl.GetUniformLocation(compiled.program, "u_PlotRect");
+            compiled.locGridDims = gl.GetUniformLocation(compiled.program, "u_GridDims");
+            compiled.locBgColor = gl.GetUniformLocation(compiled.program, "u_BgColor");
+            compiled.locParams = gl.GetUniformLocation(compiled.program, "u_Params[0]");
+            if (compiled.locParams < 0) {
+                compiled.locParams = gl.GetUniformLocation(compiled.program, "u_Params");
+            }
+            compiled.locDataTex = gl.GetUniformLocation(compiled.program, "u_DataTex");
+            compiled.locLutTex = gl.GetUniformLocation(compiled.program, "u_LutTex");
+        }
+        gpuPrograms.put(keel::String::from(shaderId), compiled);
+        return gpuPrograms.get(shaderId);
     }
 
     void FlushQuads() {
@@ -792,6 +1110,7 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, float scale) {
     m_impl->clipStack.clear();
     m_impl->quadBatch.clear();
     m_impl->triBatch.clear();
+    m_impl->activeGpuPassesThisFrame = 0u;
 
     if (!m_impl->initialized) return;
 
@@ -965,7 +1284,7 @@ void GlEs3Canvas::DrawTextStyled(
     float fontSize,
     Color color,
     FontStyle style,
-    float /*angleDeg*/
+    float angleDeg
 ) {
     if (!m_impl->initialized || text.empty() || fontSize <= 0.0f || color.a == 0u) return;
 
@@ -980,8 +1299,15 @@ void GlEs3Canvas::DrawTextStyled(
     }
 
     const Vec2 originPx = m_impl->PxPt(pos);
-    float penX = originPx.x;
-    const float baselineY = keel::round(originPx.y + fm.ascentPx);
+    const bool hasRot = (keel::abs(angleDeg) > 0.01f);
+    const float rad = hasRot ? keel::deg_to_rad(angleDeg) : 0.0f;
+    const float cosA = hasRot ? keel::cos(rad) : 1.0f;
+    const float sinA = hasRot ? keel::sin(rad) : 0.0f;
+
+    float penX = hasRot ? 0.0f : originPx.x;
+    const float baselineY = hasRot ? fm.ascentPx : keel::round(originPx.y + fm.ascentPx);
+    const float pivotX = hasRot ? originPx.x : 0.0f;
+    const float pivotY = hasRot ? originPx.y : 0.0f;
     const float stemBoost = keel::clamp(m_impl->textSettings.stemDarkening, 0.0f, 0.5f);
 
     keel::u32 prevCp = 0u;
@@ -1009,14 +1335,14 @@ void GlEs3Canvas::DrawTextStyled(
         }
 
         if (!ag->empty) {
-            const float gx = keel::round(penX) + static_cast<float>(ag->bearingX);
+            const float gx = (hasRot ? penX : keel::round(penX)) + static_cast<float>(ag->bearingX);
             const float gy = baselineY - static_cast<float>(ag->bearingY);
             m_impl->PushQuad(QuadInstance{
                 gx, gy, static_cast<float>(ag->width), static_cast<float>(ag->height),
                 ag->u0, ag->v0, ag->u1, ag->v1,
                 color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
-                0.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, kModeGlyphR8, stemBoost
+                pivotX, pivotY, 0.0f, 0.0f,
+                cosA, sinA, kModeGlyphR8, stemBoost
             }, m_impl->atlasTex);
         }
         penX += ag->advancePx;
@@ -1025,6 +1351,7 @@ void GlEs3Canvas::DrawTextStyled(
 #else
     (void)pos;
     (void)style;
+    (void)angleDeg;
 #endif
 }
 
@@ -1205,11 +1532,50 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
             }
         }
 
-        // 2. Stroke via anti-aliased line capsules
+        // 2. Stroke via anti-aliased line capsules (solid or dashed)
         if (doStroke) {
             const keel::usize segCount = subClosed ? sub.size() : (sub.size() - 1u);
-            for (keel::usize i = 0; i < segCount; ++i) {
-                DrawLine(sub[i], sub[(i + 1u) % sub.size()], paint.strokeColor, paint.strokeWidthPx);
+            if (paint.dashed && paint.dashOnPx > 0.0f && paint.dashOffPx > 0.0f) {
+                const float dashOn = paint.dashOnPx;
+                const float period = dashOn + paint.dashOffPx;
+                float phase = 0.0f;
+                for (keel::usize i = 0; i < segCount; ++i) {
+                    const Vec2 a = sub[i];
+                    const Vec2 b = sub[(i + 1u) % sub.size()];
+                    const float dx = b.x - a.x;
+                    const float dy = b.y - a.y;
+                    const float segLen = keel::hypot(dx, dy);
+                    if (segLen <= 1e-4f) continue;
+                    const float invLen = 1.0f / segLen;
+                    const float ux = dx * invLen;
+                    const float uy = dy * invLen;
+                    float dist = 0.0f;
+                    while (dist < segLen - 1e-4f) {
+                        const float remain = segLen - dist;
+                        if (phase < dashOn) {
+                            const float step = keel::min(remain, dashOn - phase);
+                            DrawLine(
+                                Vec2{a.x + ux * dist, a.y + uy * dist},
+                                Vec2{a.x + ux * (dist + step), a.y + uy * (dist + step)},
+                                paint.strokeColor,
+                                paint.strokeWidthPx
+                            );
+                            dist += step;
+                            phase += step;
+                        } else {
+                            const float step = keel::min(remain, period - phase);
+                            dist += step;
+                            phase += step;
+                        }
+                        if (phase >= period - 1e-4f) {
+                            phase = 0.0f;
+                        }
+                    }
+                }
+            } else {
+                for (keel::usize i = 0; i < segCount; ++i) {
+                    DrawLine(sub[i], sub[(i + 1u) % sub.size()], paint.strokeColor, paint.strokeWidthPx);
+                }
             }
         }
         sub.clear();
@@ -1250,6 +1616,41 @@ void GlEs3Canvas::DrawPath(const VectorPath& path, const PathPaint& paint) {
         }
     }
     flushSubpath();
+}
+
+Vec2 GlEs3Canvas::GetImageSize(keel::StringRef source) {
+    if (!m_impl) return {0.0f, 0.0f};
+    const auto* img = m_impl->ResolveImage(source, /*requireTexture=*/false);
+    if (!img || !img->valid) return {0.0f, 0.0f};
+    return {static_cast<float>(img->width), static_cast<float>(img->height)};
+}
+
+bool GlEs3Canvas::DrawImage(
+    keel::StringRef source,
+    Rect destRect,
+    float cornerRadius,
+    keel::u8 opacity
+) {
+    if (!m_impl || !m_impl->initialized || source.empty() || opacity == 0u ||
+        destRect.w <= 0.0f || destRect.h <= 0.0f) {
+        return false;
+    }
+
+    const auto* img = m_impl->ResolveImage(source, /*requireTexture=*/true);
+    if (!img || !img->valid || img->texId == 0u) {
+        return false;
+    }
+
+    const float eff = m_impl->EffScale();
+    const Rect pr = m_impl->PxRect(destRect);
+    m_impl->PushQuad(QuadInstance{
+        pr.x, pr.y, pr.w, pr.h,
+        0.0f, 0.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, opacity / 255.0f,
+        0.0f, 0.0f, 0.0f, 0.0f,
+        keel::max(0.0f, cornerRadius * eff), 0.0f, kModeTexture, 0.0f
+    }, img->texId);
+    return true;
 }
 
 bool GlEs3Canvas::DrawPixels(
@@ -1344,12 +1745,235 @@ void GlEs3Canvas::DrawTexture(
     }, static_cast<GLuint>(textureId));
 }
 
-void GlEs3Canvas::TrimCaches() noexcept {
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+void GlEs3Canvas::SetGpuShadersEnabled(bool enabled) noexcept {
     if (m_impl) {
-        m_impl->ft.TrimCaches();
+        m_impl->gpuShadersEnabled = enabled;
     }
+}
+
+bool GlEs3Canvas::SupportsGpuShaders() const noexcept {
+    return m_impl && m_impl->initialized && m_impl->gpuShadersEnabled;
+}
+
+bool GlEs3Canvas::HasActiveGpuPasses() const noexcept {
+    return m_impl && m_impl->activeGpuPassesThisFrame > 0u;
+}
+
+bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchHole*/) {
+    if (!m_impl || !m_impl->initialized || !m_impl->gpuShadersEnabled) {
+        return false;
+    }
+    if (pass.shader.shaderId.empty() || pass.shader.glslEs2.empty() ||
+        pass.dataField.empty() || pass.plotRect.w <= 0.0f || pass.plotRect.h <= 0.0f) {
+        return false;
+    }
+
+    const keel::u32 texH = static_cast<keel::u32>(pass.dataField.extent(0));
+    const keel::u32 texW = static_cast<keel::u32>(pass.dataField.extent(1));
+    if (texW == 0u || texH == 0u) {
+        return false;
+    }
+
+    const Rect plotPx = m_impl->PxRect(pass.plotRect);
+    const Rect clipPx = m_impl->clipStack.empty()
+        ? plotPx
+        : plotPx.Intersect(m_impl->clipStack.back());
+    if (clipPx.w <= 0.5f || clipPx.h <= 0.5f) {
+        return true; // Clipped completely out of view
+    }
+
+    const auto* prog = m_impl->ResolvePassProgram(pass.shader.shaderId, pass.shader.glslEs2);
+    if (!prog || prog->failed || prog->program == 0u) {
+        return false;
+    }
+
+    // Flush pending UI geometry so this GPU shader renders inline in exact Z-order
+    m_impl->FlushAll();
+
+    auto& gl = m_impl->gl;
+    auto* wt = m_impl->gpuWidgetTex.get(pass.widgetId);
+    if (!wt) {
+        Impl::WidgetGpuTextures fresh{};
+        m_impl->gpuWidgetTex.put(pass.widgetId, fresh);
+        wt = m_impl->gpuWidgetTex.get(pass.widgetId);
+    }
+    if (!wt) {
+        return false;
+    }
+
+    const float invNormScale = 1.0f / keel::max(1e-6f, pass.dataNormScale);
+    const bool needFullUpload = (wt->dataTex == 0u || wt->texW != texW || wt->texH != texH ||
+                                 wt->fullGen != pass.fullGeneration);
+    if (needFullUpload) {
+        if (wt->dataTex == 0u) {
+            gl.GenTextures(1, &wt->dataTex);
+        }
+        gl.ActiveTexture(kGlTexture0);
+        gl.BindTexture(kGlTexture2D, wt->dataTex);
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+        gl.PixelStorei(kGlUnpackAlignment, 4);
+
+        const keel::usize count = static_cast<keel::usize>(texW) * texH;
+        m_impl->gpuRgbaScratch.resize(count);
+        const float* src = pass.dataField.data();
+        for (keel::usize i = 0u; i < count; ++i) {
+            m_impl->gpuRgbaScratch[i] = PackRG16Norm((src[i] - pass.dataNormOffset) * invNormScale);
+        }
+
+        if (wt->texW != texW || wt->texH != texH) {
+            wt->texW = texW;
+            wt->texH = texH;
+            gl.TexImage2D(
+                kGlTexture2D,
+                0,
+                static_cast<GLint>(kGlRgba8),
+                static_cast<GLsizei>(texW),
+                static_cast<GLsizei>(texH),
+                0,
+                kGlRgba,
+                kGlUnsignedByte,
+                m_impl->gpuRgbaScratch.data()
+            );
+        } else {
+            gl.TexSubImage2D(
+                kGlTexture2D,
+                0,
+                0,
+                0,
+                static_cast<GLsizei>(texW),
+                static_cast<GLsizei>(texH),
+                kGlRgba,
+                kGlUnsignedByte,
+                m_impl->gpuRgbaScratch.data()
+            );
+        }
+        wt->fullGen = pass.fullGeneration;
+        wt->sliceGen = pass.sliceGeneration;
+    } else if (pass.sliceGeneration != 0u && wt->sliceGen != pass.sliceGeneration && pass.headRow < texH) {
+        // O(1) ring-buffer row update (Waterfall / live spectrogram)
+        m_impl->gpuRgbaScratch.resize(texW);
+        const float* rowSrc = pass.dataField.data() + static_cast<keel::usize>(pass.headRow) * texW;
+        for (keel::u32 x = 0u; x < texW; ++x) {
+            m_impl->gpuRgbaScratch[x] = PackRG16Norm((rowSrc[x] - pass.dataNormOffset) * invNormScale);
+        }
+        gl.ActiveTexture(kGlTexture0);
+        gl.BindTexture(kGlTexture2D, wt->dataTex);
+        gl.PixelStorei(kGlUnpackAlignment, 4);
+        gl.TexSubImage2D(
+            kGlTexture2D,
+            0,
+            0,
+            static_cast<GLint>(pass.headRow),
+            static_cast<GLsizei>(texW),
+            1,
+            kGlRgba,
+            kGlUnsignedByte,
+            m_impl->gpuRgbaScratch.data()
+        );
+        wt->sliceGen = pass.sliceGeneration;
+    }
+
+    if (pass.lutAbgr256.size() >= 256u) {
+        if (!wt->lutUploaded || wt->lutId != pass.colormapId || wt->lutTex == 0u) {
+            if (wt->lutTex == 0u) {
+                gl.GenTextures(1, &wt->lutTex);
+            }
+            gl.ActiveTexture(kGlTexture1);
+            gl.BindTexture(kGlTexture2D, wt->lutTex);
+            gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, static_cast<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, static_cast<GLint>(kGlLinear));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<GLint>(kGlClampToEdge));
+            gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<GLint>(kGlClampToEdge));
+            gl.PixelStorei(kGlUnpackAlignment, 4);
+            gl.TexImage2D(
+                kGlTexture2D,
+                0,
+                static_cast<GLint>(kGlRgba8),
+                256,
+                1,
+                0,
+                kGlRgba,
+                kGlUnsignedByte,
+                pass.lutAbgr256.data()
+            );
+            wt->lutId = pass.colormapId;
+            wt->lutUploaded = true;
+        }
+    }
+
+    // Apply clip scissor for this GPU pass
+    const GLint scX0 = keel::max(0, keel::floor_i32(clipPx.x));
+    const GLint scY0Top = keel::max(0, keel::floor_i32(clipPx.y));
+    const GLint scX1 = keel::min(static_cast<GLint>(m_impl->fbWidth), keel::ceil_i32(clipPx.Right()));
+    const GLint scY1Top = keel::min(static_cast<GLint>(m_impl->fbHeight), keel::ceil_i32(clipPx.Bottom()));
+    const GLsizei scW = keel::max(0, scX1 - scX0);
+    const GLsizei scH = keel::max(0, scY1Top - scY0Top);
+    const GLint scGlY = static_cast<GLint>(m_impl->fbHeight) - scY1Top;
+
+    gl.Enable(kGlScissorTest);
+    gl.Scissor(scX0, keel::max(0, scGlY), scW, scH);
+
+    gl.UseProgram(prog->program);
+    if (prog->locViewport >= 0) {
+        gl.Uniform2f(prog->locViewport, static_cast<float>(m_impl->fbWidth), static_cast<float>(m_impl->fbHeight));
+    }
+    if (prog->locPlotRect >= 0) {
+        gl.Uniform4f(prog->locPlotRect, plotPx.x, plotPx.y, plotPx.w, plotPx.h);
+    }
+    if (prog->locGridDims >= 0) {
+        gl.Uniform2f(prog->locGridDims, static_cast<float>(texW), static_cast<float>(texH));
+    }
+    if (prog->locBgColor >= 0) {
+        gl.Uniform3f(
+            prog->locBgColor,
+            pass.bgColor.r / 255.0f,
+            pass.bgColor.g / 255.0f,
+            pass.bgColor.b / 255.0f
+        );
+    }
+    if (prog->locParams >= 0) {
+        gl.Uniform4fv(prog->locParams, 8, &pass.params[0].x);
+    }
+
+    gl.ActiveTexture(kGlTexture0);
+    gl.BindTexture(kGlTexture2D, wt->dataTex);
+    if (prog->locDataTex >= 0) {
+        gl.Uniform1i(prog->locDataTex, 0);
+    }
+
+    gl.ActiveTexture(kGlTexture1);
+    gl.BindTexture(kGlTexture2D, wt->lutTex ? wt->lutTex : m_impl->whiteTex);
+    if (prog->locLutTex >= 0) {
+        gl.Uniform1i(prog->locLutTex, 1);
+    }
+
+    gl.BindVertexArray(m_impl->passQuadVao);
+    gl.DrawArrays(kGlTriangles, 0, 6);
+
+    // Restore canvas GL state
+    gl.BindVertexArray(0);
+    gl.ActiveTexture(kGlTexture1);
+    gl.BindTexture(kGlTexture2D, 0);
+    gl.ActiveTexture(kGlTexture0);
+    gl.BindTexture(kGlTexture2D, 0);
+    m_impl->ApplyClip();
+
+    ++m_impl->activeGpuPassesThisFrame;
+    return true;
+}
+
+void GlEs3Canvas::TrimCaches() noexcept {
+    if (!m_impl) return;
+#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+    m_impl->ft.TrimCaches();
 #endif
+    m_impl->gpuRgbaScratch.clear();
+    if (m_impl->imageCache.size() > 64u) {
+        m_impl->ReleaseImageCache();
+    }
 }
 
 keel::StringRef GlEs3Canvas::GetTextEngineName() const noexcept {
