@@ -163,6 +163,13 @@ EM_JS(void, guikit_js_open_url, (const char* ptr, keel::i32 len), {
     window.open(target, '_blank', 'noopener');
 });
 
+EM_JS(keel::i32, guikit_js_query_system_theme, (), {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 0;
+    if (window.matchMedia('(prefers-color-scheme: dark)').matches) return 1;
+    if (window.matchMedia('(prefers-color-scheme: light)').matches) return 2;
+    return 0;
+});
+
 EM_JS(void, guikit_js_install_paste_listener, (), {
     if (!window.__guikitPasteInstalled) {
         window.__guikitPasteInstalled = true;
@@ -734,6 +741,13 @@ void EmscriptenPlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
     guikit_js_open_url(urlStr.c_str(), keel::as<keel::i32>(urlStr.size()));
 }
 
+keel::Optional<ThemeMode> EmscriptenPlatformWindow::QuerySystemTheme() const noexcept {
+    const keel::i32 r = guikit_js_query_system_theme();
+    if (r == 1) return ThemeMode::Dark;
+    if (r == 2) return ThemeMode::Light;
+    return keel::kNullOpt;
+}
+
 keel::StringRef EmscriptenPlatformWindow::GetPlatformName() const noexcept {
     return "Emscripten + WebGL2";
 }
@@ -765,6 +779,7 @@ bool EmscriptenPlatformWindow::IsVsyncEnabled() const noexcept { return true; }
 void EmscriptenPlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void EmscriptenPlatformWindow::SetCursor(CursorType) noexcept {}
 void EmscriptenPlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
+keel::Optional<ThemeMode> EmscriptenPlatformWindow::QuerySystemTheme() const noexcept { return keel::kNullOpt; }
 keel::StringRef EmscriptenPlatformWindow::GetPlatformName() const noexcept { return "Emscripten (Unavailable)"; }
 
 #endif // __EMSCRIPTEN__
