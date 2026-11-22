@@ -283,11 +283,15 @@ void main() {
         if (abs(invContrast - 1.0) > 0.002) {
             cov = pow(cov, invContrast);
         }
-        if (effDarken > 0.001) {
-            cov = clamp(cov + effDarken * cov * (1.0 - cov) * (1.5 - 0.5 * cov), 0.0, 1.0);
+        float luma = dot(v_Fill.rgb, vec3(0.2126, 0.7152, 0.0722));
+        float polDarken = (gammaFlag > 0.5)
+            ? mix(clamp(effDarken * 1.85 + 0.14 * clamp(effDarken / 0.15, 0.0, 1.0), 0.0, 0.50), effDarken * 0.25, luma)
+            : effDarken;
+        if (polDarken > 0.001) {
+            cov = clamp(cov + polDarken * cov * (1.0 - cov) * (1.5 - 0.5 * cov), 0.0, 1.0);
         }
         if (gammaFlag > 0.5) {
-            float luma = dot(v_Fill.rgb, vec3(0.299, 0.587, 0.114));
+            // DirectWrite / Skia calibrated 1.8 text gamma compensation (matches CPU TextCompositor)
             float darkOnLight = 1.0 - pow(max(1.0 - cov, 0.0), 1.0 / 1.8);
             float lightOnDark = pow(cov, 1.0 / 1.8);
             cov = mix(darkOnLight, lightOnDark, luma);
@@ -305,11 +309,22 @@ void main() {
     if (abs(invContrast - 1.0) > 0.002) {
         cov3 = pow(max(cov3, vec3(0.0)), vec3(invContrast));
     }
-    if (effDarken > 0.001) {
-        cov3 = clamp(cov3 + effDarken * cov3 * (1.0 - cov3) * (1.5 - 0.5 * cov3), 0.0, 1.0);
+    float luma = dot(v_Fill.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float polDarken = (gammaFlag > 0.5)
+        ? mix(clamp(effDarken * 1.85 + 0.14 * clamp(effDarken / 0.15, 0.0, 1.0), 0.0, 0.50), effDarken * 0.25, luma)
+        : effDarken;
+    if (polDarken > 0.001) {
+        cov3 = clamp(cov3 + polDarken * cov3 * (vec3(1.0) - cov3) * (vec3(1.5) - 0.5 * cov3), vec3(0.0), vec3(1.0));
     }
+    // Saturation-aware & dark-backdrop LCD chroma damping (matches CPU TextCompositor)
+    float maxC = max(v_Fill.r, max(v_Fill.g, v_Fill.b));
+    float minC = min(v_Fill.r, min(v_Fill.g, v_Fill.b));
+    float sat = (maxC > 0.001) ? ((maxC - minC) / maxC) : 0.0;
+    float chromaKeep = clamp((1.0 - 0.85 * sat) * mix(1.0, 0.72, luma), 0.10, 1.0);
+    float avgCov = (cov3.r + cov3.g + cov3.b) * (1.0 / 3.0);
+    cov3 = mix(vec3(avgCov), cov3, chromaKeep);
     if (gammaFlag > 0.5) {
-        float luma = dot(v_Fill.rgb, vec3(0.299, 0.587, 0.114));
+        // DirectWrite / Skia 1.8 text gamma compensation (uniform luma polarity across R/G/B)
         vec3 darkOnLight = vec3(1.0) - pow(max(vec3(1.0) - cov3, vec3(0.0)), vec3(1.0 / 1.8));
         vec3 lightOnDark = pow(max(cov3, vec3(0.0)), vec3(1.0 / 1.8));
         cov3 = mix(darkOnLight, lightOnDark, luma);
@@ -809,11 +824,11 @@ struct GlEs3Canvas::Impl {
         const keel::u32 whitePx = 0xFFFFFFFFu;
         gl.TexImage2D(kGlTexture2D, 0, keel::as<GLint>(kGlRgba8), 1, 1, 0, kGlRgba, kGlUnsignedByte, &whitePx);
 
-        // 1024x1024 R8 glyph atlas texture
+        // 1024x1024 R8 glyph atlas texture (GL_NEAREST for bit-exact 1:1 pixel-snapped UI glyphs)
         gl.GenTextures(1, &atlasTex);
         gl.BindTexture(kGlTexture2D, atlasTex);
-        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlLinear));
-        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlNearest));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlNearest));
         gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
         gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
         gl.PixelStorei(kGlUnpackAlignment, 1);
@@ -1200,9 +1215,9 @@ struct GlEs3Canvas::Impl {
         return true;
     }
 
-    const AtlasGlyph* ResolveAtlasGlyph(keel::u32 cp, keel::f32 scaledPx, FontStyle style, keel::u8 phase) {
+    const AtlasGlyph* ResolveAtlasGlyph(keel::u32 cp, keel::f32 scaledPx, FontStyle style, FontHinting effHint, keel::u8 phase) {
         const keel::u16 sizeQ4 = keel::as<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
-        const keel::u8 flags = keel::as<keel::u8>((keel::as<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
+        const keel::u8 flags = keel::as<keel::u8>((keel::as<keel::u8>(effHint) & 3u) | ((phase & 3u) << 2));
         const AtlasKey key{
             .codepoint = cp,
             .sizeQ4 = sizeQ4,
@@ -1214,7 +1229,7 @@ struct GlEs3Canvas::Impl {
         }
 
         TextEngine::RasterizedGlyph rg{};
-        if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/false, phase, rg)) {
+        if (!ft.RasterizeCodepoint(cp, scaledPx, style, effHint, /*subpixel=*/false, phase, rg)) {
             return nullptr;
         }
 
@@ -1274,12 +1289,12 @@ struct GlEs3Canvas::Impl {
         return atlasMap.get(key);
     }
 
-    const AtlasGlyph* ResolveLcdAtlasGlyph(keel::u32 cp, keel::f32 scaledPx, FontStyle style, keel::u8 phase) {
+    const AtlasGlyph* ResolveLcdAtlasGlyph(keel::u32 cp, keel::f32 scaledPx, FontStyle style, FontHinting effHint, keel::u8 phase) {
         if (!EnsureLcdAtlas()) {
             return nullptr;
         }
         const keel::u16 sizeQ4 = keel::as<keel::u16>(keel::clamp(keel::round_i32(scaledPx * 4.0f), 4, 2048));
-        const keel::u8 flags = keel::as<keel::u8>((keel::as<keel::u8>(textSettings.hinting) & 3u) | ((phase & 3u) << 2));
+        const keel::u8 flags = keel::as<keel::u8>((keel::as<keel::u8>(effHint) & 3u) | ((phase & 3u) << 2));
         const AtlasKey key{
             .codepoint = cp,
             .sizeQ4 = sizeQ4,
@@ -1291,7 +1306,7 @@ struct GlEs3Canvas::Impl {
         }
 
         TextEngine::RasterizedGlyph rg{};
-        if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/true, phase, rg)) {
+        if (!ft.RasterizeCodepoint(cp, scaledPx, style, effHint, /*subpixel=*/true, phase, rg)) {
             return nullptr;
         }
 
@@ -1649,7 +1664,8 @@ Vec2 GlEs3Canvas::MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, Fo
 #if GUIKIT_HAS_TEXT_RASTERIZER
     if (m_impl->ft.HasFontForStyle(style)) {
         const keel::f32 eff = m_impl->EffScale();
-        const Vec2 px = m_impl->ft.MeasureText(text, fontSize * eff, style, m_impl->textSettings.hinting);
+        const FontHinting effHint = TextCompositor::ResolveEffectiveHinting(m_impl->textSettings.hinting, eff);
+        const Vec2 px = m_impl->ft.MeasureText(text, fontSize * eff, style, effHint);
         return {px.x / eff, px.y / eff};
     }
 #endif
@@ -1663,8 +1679,9 @@ keel::f32 GlEs3Canvas::GetLineHeight(keel::f32 fontSize) {
 #if GUIKIT_HAS_TEXT_RASTERIZER
     if (m_impl->ft.HasFontForStyle(FontStyle::Regular)) {
         const keel::f32 eff = m_impl->EffScale();
+        const FontHinting effHint = TextCompositor::ResolveEffectiveHinting(m_impl->textSettings.hinting, eff);
         TextEngine::FontMetrics fm{};
-        if (m_impl->ft.GetFontMetrics(fontSize * eff, FontStyle::Regular, m_impl->textSettings.hinting, fm)) {
+        if (m_impl->ft.GetFontMetrics(fontSize * eff, FontStyle::Regular, effHint, fm)) {
             return fm.lineHeightPx / eff;
         }
     }
@@ -1691,8 +1708,9 @@ void GlEs3Canvas::DrawTextStyled(
 
     const keel::f32 eff = m_impl->EffScale();
     const keel::f32 scaledPx = fontSize * eff;
+    const FontHinting effHint = TextCompositor::ResolveEffectiveHinting(m_impl->textSettings.hinting, eff);
     TextEngine::FontMetrics fm{};
-    if (!m_impl->ft.GetFontMetrics(scaledPx, style, m_impl->textSettings.hinting, fm)) {
+    if (!m_impl->ft.GetFontMetrics(scaledPx, style, effHint, fm)) {
         return;
     }
 
@@ -1707,7 +1725,7 @@ void GlEs3Canvas::DrawTextStyled(
         : TextCompositor::ResolveEffectiveSmoothing(m_impl->textSettings.smoothing, eff);
     const bool useLcd = (!hasRot && (effSmooth == FontSmoothing::SubpixelRGB || effSmooth == FontSmoothing::SubpixelBGR));
     const bool bgrOrder = (effSmooth == FontSmoothing::SubpixelBGR);
-    const bool useSubPhase = (!hasRot && m_impl->textSettings.hinting != FontHinting::Normal);
+    const bool useSubPhase = (!hasRot && effHint != FontHinting::Normal);
 
     const keel::f32 clampedContrast = keel::clamp(m_impl->textSettings.contrast, 0.5f, 2.0f);
     const keel::f32 invContrast = 1.0f / clampedContrast;
@@ -1733,7 +1751,7 @@ void GlEs3Canvas::DrawTextStyled(
         const keel::u32 cp = keel::utf8_decode_next(text, offset);
         if (cp == '\n' || cp == '\r') continue;
         if (cp == '\t') {
-            if (const auto* sp = m_impl->ResolveAtlasGlyph(keel::as<keel::u32>(' '), scaledPx, style, 0u)) {
+            if (const auto* sp = m_impl->ResolveAtlasGlyph(keel::as<keel::u32>(' '), scaledPx, style, effHint, 0u)) {
                 penX += (sp->advancePx > 0.0f) ? (sp->advancePx * 4.0f) : (scaledPx * 2.4f);
             } else {
                 penX += scaledPx * 2.4f;
@@ -1742,24 +1760,33 @@ void GlEs3Canvas::DrawTextStyled(
             continue;
         }
         if (prevCp != 0u) {
-            penX += m_impl->ft.GetKerningPx(prevCp, cp, scaledPx, style, m_impl->textSettings.hinting);
+            const keel::f32 kPx = m_impl->ft.GetKerningPx(prevCp, cp, scaledPx, style, effHint);
+            penX += useSubPhase ? kPx : keel::round(kPx);
         }
 
         keel::f32 cellX = penX;
         keel::u8 phase = 0u;
         if (!hasRot) {
             if (useSubPhase) {
-                const keel::i32 qx = keel::round_i32(penX * 4.0f);
-                cellX = keel::as<keel::f32>(qx >> 2);
-                phase = keel::as<keel::u8>(qx & 3);
+                if (useLcd) {
+                    const keel::i32 qx = keel::round_i32(penX * 3.0f);
+                    keel::i32 rem = qx % 3;
+                    if (rem < 0) rem += 3;
+                    cellX = keel::as<keel::f32>((qx - rem) / 3);
+                    phase = keel::as<keel::u8>(rem);
+                } else {
+                    const keel::i32 qx = keel::round_i32(penX * 4.0f);
+                    cellX = keel::as<keel::f32>(qx >> 2);
+                    phase = keel::as<keel::u8>(qx & 3);
+                }
             } else {
                 cellX = keel::round(penX);
             }
         }
 
         const Impl::AtlasGlyph* ag = useLcd
-            ? m_impl->ResolveLcdAtlasGlyph(cp, scaledPx, style, phase)
-            : m_impl->ResolveAtlasGlyph(cp, scaledPx, style, phase);
+            ? m_impl->ResolveLcdAtlasGlyph(cp, scaledPx, style, effHint, phase)
+            : m_impl->ResolveAtlasGlyph(cp, scaledPx, style, effHint, phase);
         if (!ag) {
             prevCp = cp;
             continue;
@@ -1826,8 +1853,9 @@ void GlEs3Canvas::DrawTextBoxStyled(
 #if GUIKIT_HAS_TEXT_RASTERIZER
     if (m_impl->ft.HasFontForStyle(style)) {
         const keel::f32 eff = m_impl->EffScale();
+        const FontHinting effHint = TextCompositor::ResolveEffectiveHinting(m_impl->textSettings.hinting, eff);
         TextEngine::FontMetrics fm{};
-        if (m_impl->ft.GetFontMetrics(fontSize * eff, style, m_impl->textSettings.hinting, fm)) {
+        if (m_impl->ft.GetFontMetrics(fontSize * eff, style, effHint, fm)) {
             const keel::f32 asc = fm.ascentPx / eff;
             const keel::f32 cap = fm.capHeightPx / eff;
             if (alignY > 0.4f && alignY < 0.6f) {
@@ -1838,7 +1866,8 @@ void GlEs3Canvas::DrawTextBoxStyled(
     }
 #endif
 
-    PushClip(bounds);
+    const keel::f32 vPad = keel::max(4.0f, fontSize * 0.35f);
+    PushClip(Rect(bounds.x - 2.0f, bounds.y - vPad, bounds.w + 4.0f, bounds.h + vPad * 2.0f));
     DrawTextStyled(drawStr, {x, y}, fontSize, color, style, 0.0f);
     PopClip();
 }
