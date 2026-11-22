@@ -42,7 +42,6 @@ public:
 
     void SetCursor(CursorType cursor) noexcept override;
     void OpenUrl(keel::StringRef url) const noexcept override;
-    [[nodiscard]] keel::Optional<ThemeMode> QuerySystemTheme() const noexcept override;
 
     [[nodiscard]] keel::StringRef GetPlatformName() const noexcept override;
 

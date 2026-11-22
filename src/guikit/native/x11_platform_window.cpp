@@ -1307,63 +1307,6 @@ void X11PlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
     }
 }
 
-keel::Optional<ThemeMode> X11PlatformWindow::QuerySystemTheme() const noexcept {
-    auto containsCaseInsensitive = [](keel::StringRef haystack, keel::StringRef needle) noexcept -> bool {
-        if (needle.empty() || haystack.size() < needle.size()) return false;
-        for (keel::usize i = 0u; i + needle.size() <= haystack.size(); ++i) {
-            bool match = true;
-            for (keel::usize j = 0u; j < needle.size(); ++j) {
-                char a = haystack[i + j];
-                char b = needle[j];
-                if (a >= 'A' && a <= 'Z') a = keel::as<char>(a + ('a' - 'A'));
-                if (b >= 'A' && b <= 'Z') b = keel::as<char>(b + ('a' - 'A'));
-                if (a != b) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) return true;
-        }
-        return false;
-    };
-
-    if (const auto gtkTheme = keel::env_get("GTK_THEME"); gtkTheme.has_value() && !gtkTheme->empty()) {
-        if (containsCaseInsensitive(*gtkTheme, "dark")) {
-            return ThemeMode::Dark;
-        }
-        if (containsCaseInsensitive(*gtkTheme, "light")) {
-            return ThemeMode::Light;
-        }
-    }
-
-    if (const auto home = keel::env_get("HOME"); home.has_value() && !home->empty()) {
-        const keel::String iniPath = keel::format("{}/.config/gtk-3.0/settings.ini", *home);
-        const keel::i32 fd = ::open(iniPath.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd >= 0) {
-            char buf[2048]{};
-            const keel::isize n = ::read(fd, buf, sizeof(buf) - 1u);
-            ::close(fd);
-            if (n > 0) {
-                const keel::StringRef content(buf, keel::as<keel::usize>(n));
-                if (containsCaseInsensitive(content, "gtk-application-prefer-dark-theme=1") ||
-                    containsCaseInsensitive(content, "gtk-application-prefer-dark-theme = 1") ||
-                    containsCaseInsensitive(content, "gtk-application-prefer-dark-theme=true") ||
-                    containsCaseInsensitive(content, "gtk-application-prefer-dark-theme = true")) {
-                    return ThemeMode::Dark;
-                }
-                if (containsCaseInsensitive(content, "gtk-application-prefer-dark-theme=0") ||
-                    containsCaseInsensitive(content, "gtk-application-prefer-dark-theme = 0") ||
-                    containsCaseInsensitive(content, "gtk-application-prefer-dark-theme=false") ||
-                    containsCaseInsensitive(content, "gtk-application-prefer-dark-theme = false")) {
-                    return ThemeMode::Light;
-                }
-            }
-        }
-    }
-
-    return keel::kNullOpt;
-}
-
 keel::StringRef X11PlatformWindow::GetPlatformName() const noexcept {
     return "X11 + EGL";
 }
@@ -1392,7 +1335,6 @@ bool X11PlatformWindow::IsVsyncEnabled() const noexcept { return true; }
 void X11PlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void X11PlatformWindow::SetCursor(CursorType) noexcept {}
 void X11PlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
-keel::Optional<ThemeMode> X11PlatformWindow::QuerySystemTheme() const noexcept { return keel::kNullOpt; }
 keel::StringRef X11PlatformWindow::GetPlatformName() const noexcept { return "X11 (Unavailable)"; }
 
 #endif // GUIKIT_NATIVE_COMPILE_X11

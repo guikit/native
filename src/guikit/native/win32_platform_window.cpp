@@ -1280,42 +1280,6 @@ void Win32PlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
     (void)::ShellExecuteW(nullptr, L"open", wideUrl.data(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-keel::Optional<ThemeMode> Win32PlatformWindow::QuerySystemTheme() const noexcept {
-    using PfnRegGetValueW = LONG(WINAPI*)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID, LPDWORD); // keel-lint: ignore
-    HMODULE advapi = ::GetModuleHandleW(L"advapi32.dll");
-    bool loadedHere = false;
-    if (!advapi) {
-        advapi = ::LoadLibraryW(L"advapi32.dll");
-        loadedHere = (advapi != nullptr);
-    }
-    if (!advapi) {
-        return keel::kNullOpt;
-    }
-    const auto regGetValueW = reinterpret_cast<PfnRegGetValueW>(::GetProcAddress(advapi, "RegGetValueW"));
-    keel::Optional<ThemeMode> result = keel::kNullOpt;
-    if (regGetValueW) {
-        DWORD value = 1u;
-        DWORD size = sizeof(value);
-        static constexpr DWORD kRrfRtRegDword = 0x00000010u;
-        const LONG status = regGetValueW( // keel-lint: ignore
-            HKEY_CURRENT_USER,
-            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-            L"AppsUseLightTheme",
-            kRrfRtRegDword,
-            nullptr,
-            &value,
-            &size
-        );
-        if (status == ERROR_SUCCESS) {
-            result = (value == 0u) ? ThemeMode::Dark : ThemeMode::Light;
-        }
-    }
-    if (loadedHere) {
-        ::FreeLibrary(advapi);
-    }
-    return result;
-}
-
 keel::StringRef Win32PlatformWindow::GetPlatformName() const noexcept {
     return "Win32 (WGL + OpenGL 3.3 Core)";
 }
@@ -1348,7 +1312,6 @@ bool Win32PlatformWindow::IsVsyncEnabled() const noexcept { return true; }
 void Win32PlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void Win32PlatformWindow::SetCursor(CursorType) noexcept {}
 void Win32PlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
-keel::Optional<ThemeMode> Win32PlatformWindow::QuerySystemTheme() const noexcept { return keel::kNullOpt; }
 keel::StringRef Win32PlatformWindow::GetPlatformName() const noexcept { return "Win32 (Unavailable)"; }
 
 } // namespace guikit::native
