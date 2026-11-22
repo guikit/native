@@ -6,8 +6,11 @@
 #include "guikit/core/assets.hpp"
 #include "guikit/core/text_util.hpp"
 #include "guikit/core/tokens.hpp"
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
-#include "guikit/backend/freetype_text_engine.hpp"
+#if (defined(GUIKIT_HAS_TEXT_ENGINE) && GUIKIT_HAS_TEXT_ENGINE) || (defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE)
+#define GUIKIT_HAS_TEXT_RASTERIZER 1
+#include "guikit/backend/text_engine.hpp"
+#else
+#define GUIKIT_HAS_TEXT_RASTERIZER 0
 #endif
 #include "keel/array.h"
 #include "keel/format.h"
@@ -569,7 +572,7 @@ struct GlEs3Canvas::Impl {
         Vec2 offset{0.0f, 0.0f};
     };
 
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     struct AtlasKey {
         keel::u32 codepoint{0};
         keel::u16 sizeQ4{0};
@@ -694,8 +697,8 @@ struct GlEs3Canvas::Impl {
     keel::SmallArray<Rect, 16> clipStack;
     TextRenderSettings textSettings{};
 
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
-    FreeTypeTextEngine ft;
+#if GUIKIT_HAS_TEXT_RASTERIZER
+    TextEngine ft;
     keel::HashMap<AtlasKey, AtlasGlyph, AtlasKeyHash> atlasMap;
     keel::u32 shelfX{1};
     keel::u32 shelfY{1};
@@ -728,7 +731,7 @@ struct GlEs3Canvas::Impl {
     }
 
     bool Init(GlProcAddressFn procLoader, bool loadDefaultFonts) {
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
         if (loadDefaultFonts && ft.IsAvailable()) {
             (void)ft.LoadDefaultEmbeddedFonts();
         }
@@ -1157,7 +1160,7 @@ struct GlEs3Canvas::Impl {
         triBatch.push_back(TriVertex{c.x, c.y, r, g, bl, al});
     }
 
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     void ResetAtlas() {
         FlushQuads();
         atlasMap.clear();
@@ -1210,7 +1213,7 @@ struct GlEs3Canvas::Impl {
             return found;
         }
 
-        FreeTypeTextEngine::RasterizedGlyph rg{};
+        TextEngine::RasterizedGlyph rg{};
         if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/false, phase, rg)) {
             return nullptr;
         }
@@ -1287,7 +1290,7 @@ struct GlEs3Canvas::Impl {
             return found;
         }
 
-        FreeTypeTextEngine::RasterizedGlyph rg{};
+        TextEngine::RasterizedGlyph rg{};
         if (!ft.RasterizeCodepoint(cp, scaledPx, style, textSettings.hinting, /*subpixel=*/true, phase, rg)) {
             return nullptr;
         }
@@ -1413,7 +1416,7 @@ keel::i32 GlEs3Canvas::GetStencilBits() const noexcept {
 }
 
 bool GlEs3Canvas::LoadFontFile(keel::StringRef path, FontStyle style) {
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (const auto asset = Assets::Find(path); asset && !asset->Empty()) {
         m_impl->ResetAtlas();
         return m_impl->ft.LoadFontMemory(asset->Bytes(), style, /*copyData=*/false);
@@ -1435,7 +1438,7 @@ bool GlEs3Canvas::LoadFontMemory(
     FontStyle style,
     keel::StringRef /*mimeType*/
 ) {
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (data.empty()) return false;
     m_impl->ResetAtlas();
     return m_impl->ft.LoadFontMemory(data, style, /*copyData=*/true);
@@ -1643,7 +1646,7 @@ Vec2 GlEs3Canvas::MeasureText(keel::StringRef text, keel::f32 fontSize) {
 
 Vec2 GlEs3Canvas::MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, FontStyle style) {
     if (fontSize <= 0.0f) return {0.0f, 0.0f};
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (m_impl->ft.HasFontForStyle(style)) {
         const keel::f32 eff = m_impl->EffScale();
         const Vec2 px = m_impl->ft.MeasureText(text, fontSize * eff, style, m_impl->textSettings.hinting);
@@ -1657,10 +1660,10 @@ Vec2 GlEs3Canvas::MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, Fo
 
 keel::f32 GlEs3Canvas::GetLineHeight(keel::f32 fontSize) {
     if (fontSize <= 0.0f) return 0.0f;
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (m_impl->ft.HasFontForStyle(FontStyle::Regular)) {
         const keel::f32 eff = m_impl->EffScale();
-        FreeTypeTextEngine::FontMetrics fm{};
+        TextEngine::FontMetrics fm{};
         if (m_impl->ft.GetFontMetrics(fontSize * eff, FontStyle::Regular, m_impl->textSettings.hinting, fm)) {
             return fm.lineHeightPx / eff;
         }
@@ -1683,12 +1686,12 @@ void GlEs3Canvas::DrawTextStyled(
 ) {
     if (!m_impl->initialized || text.empty() || fontSize <= 0.0f || color.a == 0u) return;
 
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (!m_impl->ft.HasFontForStyle(style)) return;
 
     const keel::f32 eff = m_impl->EffScale();
     const keel::f32 scaledPx = fontSize * eff;
-    FreeTypeTextEngine::FontMetrics fm{};
+    TextEngine::FontMetrics fm{};
     if (!m_impl->ft.GetFontMetrics(scaledPx, style, m_impl->textSettings.hinting, fm)) {
         return;
     }
@@ -1820,10 +1823,10 @@ void GlEs3Canvas::DrawTextBoxStyled(
     const keel::f32 x = bounds.x + keel::max(0.0f, (bounds.w - dims.x) * alignX);
     keel::f32 y = bounds.y + (bounds.h - dims.y) * alignY;
 
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (m_impl->ft.HasFontForStyle(style)) {
         const keel::f32 eff = m_impl->EffScale();
-        FreeTypeTextEngine::FontMetrics fm{};
+        TextEngine::FontMetrics fm{};
         if (m_impl->ft.GetFontMetrics(fontSize * eff, style, m_impl->textSettings.hinting, fm)) {
             const keel::f32 asc = fm.ascentPx / eff;
             const keel::f32 cap = fm.capHeightPx / eff;
@@ -2509,7 +2512,7 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
 
 void GlEs3Canvas::TrimCaches() noexcept {
     if (!m_impl) return;
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     m_impl->ft.TrimCaches();
     m_impl->lcdUploadScratch = {};
 #endif
@@ -2565,13 +2568,15 @@ void GlEs3Canvas::TrimCaches() noexcept {
 keel::StringRef GlEs3Canvas::GetTextEngineName() const noexcept {
 #if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
     return "FreeType (GPU Atlas + LCD)";
+#elif GUIKIT_HAS_TEXT_RASTERIZER
+    return "keel::font (GPU Atlas + LCD)";
 #else
     return "None";
 #endif
 }
 
 bool GlEs3Canvas::SupportsFontHinting() const noexcept {
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     return true;
 #else
     return false;
@@ -2582,7 +2587,7 @@ void GlEs3Canvas::SetTextRenderSettings(const TextRenderSettings& settings) noex
     if (!m_impl) return;
     const bool hintingChanged = (m_impl->textSettings.hinting != settings.hinting);
     m_impl->textSettings = settings;
-#if defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE
+#if GUIKIT_HAS_TEXT_RASTERIZER
     if (hintingChanged && m_impl->initialized) {
         m_impl->ResetAtlas();
     }
