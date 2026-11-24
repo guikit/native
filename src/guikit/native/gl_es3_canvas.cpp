@@ -4,6 +4,7 @@
 #include "guikit/backend/text_compositor.hpp"
 #include "guikit/backend/vector_backend.hpp"
 #include "guikit/core/assets.hpp"
+#include "guikit/core/image_cache.hpp"
 #include "guikit/core/text_util.hpp"
 #include "guikit/core/tokens.hpp"
 #if (defined(GUIKIT_HAS_TEXT_ENGINE) && GUIKIT_HAS_TEXT_ENGINE) || (defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE)
@@ -688,6 +689,7 @@ struct GlEs3Canvas::Impl {
     keel::HashMap<keel::String, CompiledPassProgram> gpuPrograms;
     keel::HashMap<keel::u64, WidgetGpuTextures> gpuWidgetTex;
     keel::Array<keel::u32> gpuRgbaScratch;
+    ImageCache cpuImageCache;
     keel::HashMap<keel::String, CachedImage> imageCache;
 
     GLuint whiteTex{0};
@@ -932,6 +934,7 @@ struct GlEs3Canvas::Impl {
             }
         }
         imageCache.clear();
+        cpuImageCache.Clear();
     }
 
     void Shutdown() noexcept {
@@ -966,52 +969,42 @@ struct GlEs3Canvas::Impl {
             }
         }
 
-        keel::Array<keel::u8> ownedBytes;
-        keel::ArrayRef<keel::u8> bytes{};
-        if (const auto asset = Assets::Find(source); asset && !asset->Empty()) {
-            bytes = asset->Bytes();
-        } else if (auto fileBytes = keel::fs_read_file(source)) {
-            ownedBytes = keel::move(*fileBytes);
-            bytes = ownedBytes.as_ref();
-        } else {
-            CachedImage invalid{};
-            invalid.valid = false;
-            imageCache.put(keel::String::from(source), invalid);
-            return imageCache.get(source);
-        }
-
         if (!requireTexture) {
-            keel::u32 w = 0u;
-            keel::u32 h = 0u;
-            if (InspectImageFromMemory(bytes, w, h)) {
+            const Vec2 sz = cpuImageCache.ProbeSize(source);
+            if (sz.x > 0.0f && sz.y > 0.0f) {
                 CachedImage probed{};
-                probed.width = w;
-                probed.height = h;
+                probed.width = keel::as<keel::u32>(sz.x);
+                probed.height = keel::as<keel::u32>(sz.y);
                 probed.valid = true;
                 probed.probedOnly = true;
                 imageCache.put(keel::String::from(source), probed);
                 return imageCache.get(source);
             }
-        }
-
-        keel::u32 w = 0u;
-        keel::u32 h = 0u;
-        keel::Array<keel::u32> rgba;
-        const bool decoded = DecodeImageFromMemory(bytes, w, h, rgba);
-        if (!decoded || w == 0u || h == 0u || rgba.size() < keel::as<keel::usize>(w) * h) {
             CachedImage invalid{};
             invalid.valid = false;
             imageCache.put(keel::String::from(source), invalid);
             return imageCache.get(source);
         }
 
+        const CachedImageEntry* decoded = cpuImageCache.ResolvePixels(source);
+        if (!decoded || !decoded->valid || decoded->width == 0u || decoded->height == 0u ||
+            decoded->pixels.size() < keel::as<keel::usize>(decoded->width) * decoded->height) {
+            CachedImage invalid{};
+            invalid.valid = false;
+            imageCache.put(keel::String::from(source), invalid);
+            return imageCache.get(source);
+        }
+
+        const keel::u32 w = decoded->width;
+        const keel::u32 h = decoded->height;
+
         CachedImage entry{};
         entry.width = w;
         entry.height = h;
         entry.valid = true;
-        entry.probedOnly = !requireTexture;
+        entry.probedOnly = false;
 
-        if (requireTexture && initialized) {
+        if (initialized) {
             GLuint tex = 0u;
             gl.GenTextures(1, &tex);
             gl.BindTexture(kGlTexture2D, tex);
@@ -1029,11 +1022,10 @@ struct GlEs3Canvas::Impl {
                 0,
                 kGlRgba,
                 kGlUnsignedByte,
-                rgba.data()
+                decoded->pixels.data()
             );
             gl.BindTexture(kGlTexture2D, 0);
             entry.texId = tex;
-            entry.probedOnly = false;
         }
 
         imageCache.put(keel::String::from(source), entry);

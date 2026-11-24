@@ -21,6 +21,9 @@
 #ifdef IsMinimized
 #undef IsMinimized
 #endif
+#ifdef DrawText
+#undef DrawText
+#endif
 
 #ifndef WM_DPICHANGED
 #define WM_DPICHANGED 0x02E0

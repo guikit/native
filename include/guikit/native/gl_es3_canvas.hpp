@@ -12,13 +12,16 @@ namespace guikit::native {
 /// textured quads, FreeType glyph atlas) plus a triangulated path/polygon renderer.
 /// Zero external GL loader dependencies (`glad`/`glew` not required); all GL entry points
 /// are resolved dynamically through `GlProcAddressFn`.
-class GlEs3Canvas final : public ICanvas {
+class GlEs3Canvas final : public ICanvas, public IGpuPassRenderer {
 public:
     explicit GlEs3Canvas(GlProcAddressFn procLoader, bool loadDefaultFonts = true);
     ~GlEs3Canvas() override;
 
     GlEs3Canvas(const GlEs3Canvas&) = delete;
     GlEs3Canvas& operator=(const GlEs3Canvas&) = delete;
+
+    [[nodiscard]] IGpuPassRenderer* QueryGpuPassRenderer() noexcept override { return this; }
+    [[nodiscard]] const IGpuPassRenderer* QueryGpuPassRenderer() const noexcept override { return this; }
 
     /// Returns true if OpenGL entry points, shaders, and GPU buffers initialized successfully.
     [[nodiscard]] bool IsInitialized() const noexcept;
@@ -30,8 +33,6 @@ public:
     [[nodiscard]] keel::StringRef GetGlRendererString() const noexcept;
     [[nodiscard]] keel::i32 GetMsaaSamples() const noexcept;
     [[nodiscard]] keel::i32 GetStencilBits() const noexcept;
-
-    [[nodiscard]] bool UsesCpuFramebuffer() const noexcept override { return false; }
 
     bool LoadFontFile(keel::StringRef path, FontStyle style = FontStyle::Regular) override;
     bool LoadFontMemory(
@@ -153,6 +154,7 @@ public:
     void SetGpuShadersEnabled(bool enabled) noexcept override;
     [[nodiscard]] bool SupportsGpuShaders() const noexcept override;
     [[nodiscard]] bool HasActiveGpuPasses() const noexcept override;
+    [[nodiscard]] keel::ArrayRef<GpuShaderPassDesc> GetGpuShaderPasses() const noexcept override { return {}; }
     bool DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool punchHole = true) override;
 
     void TrimCaches() noexcept override;
