@@ -1464,6 +1464,31 @@ bool GlEs3Canvas::LoadFontMemory(
 #endif
 }
 
+bool GlEs3Canvas::AddFallbackFontMemory(
+    keel::ArrayRef<keel::u8> data,
+    bool copyData
+) {
+#if GUIKIT_HAS_TEXT_RASTERIZER
+    if (data.empty()) return false;
+    if (m_impl->ft.AddFallbackFontMemory(data, copyData)) {
+        m_impl->ResetAtlas();
+        return true;
+    }
+    return false;
+#else
+    (void)data;
+    (void)copyData;
+    return false;
+#endif
+}
+
+void GlEs3Canvas::ClearFallbackFonts() noexcept {
+#if GUIKIT_HAS_TEXT_RASTERIZER
+    m_impl->ft.ClearFallbackFonts();
+    m_impl->ResetAtlas();
+#endif
+}
+
 void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->fbWidth = width;
     m_impl->fbHeight = height;

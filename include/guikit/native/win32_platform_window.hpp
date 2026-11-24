@@ -42,6 +42,7 @@ public:
     void SetVsyncEnabled(bool enabled) noexcept override;
 
     void SetCursor(CursorType cursor) noexcept override;
+    void SetTextInputActive(bool active, Rect caretRectPx) noexcept override;
     void OpenUrl(keel::StringRef url) const noexcept override;
 
     [[nodiscard]] keel::StringRef GetPlatformName() const noexcept override;

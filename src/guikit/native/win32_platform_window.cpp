@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <imm.h>
 #ifdef IsMinimized
 #undef IsMinimized
 #endif
@@ -75,6 +76,11 @@ using PfnSetProcessDPIAware = BOOL(WINAPI*)();
 using PfnGetDpiForWindow = UINT(WINAPI*)(HWND);
 using PfnAdjustWindowRectExForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
 using PfnDwmSetWindowAttribute = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+using PfnImmGetContext = HIMC(WINAPI*)(HWND);
+using PfnImmReleaseContext = BOOL(WINAPI*)(HWND, HIMC);
+using PfnImmGetCompositionStringW = LONG(WINAPI*)(HIMC, DWORD, LPVOID, DWORD);
+using PfnImmSetCompositionWindow = BOOL(WINAPI*)(HIMC, LPCOMPOSITIONFORM);
+using PfnImmSetCandidateWindow = BOOL(WINAPI*)(HIMC, LPCANDIDATEFORM);
 
 HMODULE g_opengl32Module{nullptr};
 
@@ -467,6 +473,16 @@ struct Win32PlatformWindow::Impl {
     PfnWglCreateContextAttribsArb wglCreateContextAttribsArb{nullptr};
     PfnWglSwapIntervalExt wglSwapIntervalExt{nullptr};
 
+    bool immProbed{false};
+    keel::Optional<keel::DynLib> imm32Lib;
+    PfnImmGetContext immGetContext{nullptr};
+    PfnImmReleaseContext immReleaseContext{nullptr};
+    PfnImmGetCompositionStringW immGetCompositionStringW{nullptr};
+    PfnImmSetCompositionWindow immSetCompositionWindow{nullptr};
+    PfnImmSetCandidateWindow immSetCandidateWindow{nullptr};
+    Rect lastImeCaretPx{};
+    bool imeActive{false};
+
     Context* ui{nullptr};
     WindowHostCallbacks callbacks{};
 
@@ -526,6 +542,50 @@ struct Win32PlatformWindow::Impl {
         pendingHighSurrogate = 0u;
         inSizeMove = false;
         liveResizeFrame = false;
+        imeActive = false;
+        lastImeCaretPx = {};
+    }
+
+    void EnsureImmLoaded() noexcept {
+        if (immProbed) {
+            return;
+        }
+        immProbed = true;
+        if (auto lib = keel::DynLib::open("imm32.dll"); lib.is_ok()) {
+            imm32Lib = keel::move(lib.value());
+            immGetContext = imm32Lib->symbol<PfnImmGetContext>("ImmGetContext");
+            immReleaseContext = imm32Lib->symbol<PfnImmReleaseContext>("ImmReleaseContext");
+            immGetCompositionStringW = imm32Lib->symbol<PfnImmGetCompositionStringW>("ImmGetCompositionStringW");
+            immSetCompositionWindow = imm32Lib->symbol<PfnImmSetCompositionWindow>("ImmSetCompositionWindow");
+            immSetCandidateWindow = imm32Lib->symbol<PfnImmSetCandidateWindow>("ImmSetCandidateWindow");
+        }
+    }
+
+    void UpdateImmCaretPosition(Rect caretRectPx) noexcept {
+        if (!hwnd) return;
+        EnsureImmLoaded();
+        if (!immGetContext || !immReleaseContext) return;
+        HIMC himc = immGetContext(hwnd);
+        if (!himc) return;
+        const LONG x = keel::as<LONG>(keel::round_i32(caretRectPx.x));
+        const LONG y = keel::as<LONG>(keel::round_i32(caretRectPx.y));
+        const LONG bottom = keel::as<LONG>(keel::round_i32(caretRectPx.y + keel::max(caretRectPx.h, 16.0f)));
+        if (immSetCompositionWindow) {
+            COMPOSITIONFORM cf{};
+            cf.dwStyle = CFS_POINT;
+            cf.ptCurrentPos.x = x;
+            cf.ptCurrentPos.y = y;
+            (void)immSetCompositionWindow(himc, &cf);
+        }
+        if (immSetCandidateWindow) {
+            CANDIDATEFORM cand{};
+            cand.dwIndex = 0u;
+            cand.dwStyle = CFS_CANDIDATEPOS;
+            cand.ptCurrentPos.x = x;
+            cand.ptCurrentPos.y = bottom;
+            (void)immSetCandidateWindow(himc, &cand);
+        }
+        (void)immReleaseContext(hwnd, himc);
     }
 
     bool BootstrapWglExtensions() noexcept {
@@ -976,9 +1036,81 @@ struct Win32PlatformWindow::Impl {
                 }
                 return 0;
 
+            case WM_IME_STARTCOMPOSITION:
+                if (imeActive) {
+                    UpdateImmCaretPosition(lastImeCaretPx);
+                }
+                break;
+
+            case WM_IME_COMPOSITION: {
+                if (ui && (lParam & GCS_COMPSTR) != 0) {
+                    EnsureImmLoaded();
+                    if (immGetContext && immReleaseContext && immGetCompositionStringW) {
+                        HIMC himc = immGetContext(hWnd);
+                        if (himc) {
+                            const LONG byteLen = immGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0u);
+                            if (byteLen > 0) {
+                                const keel::usize wcharCount = keel::as<keel::usize>(byteLen) / sizeof(wchar_t);
+                                keel::Array<wchar_t> buf(wcharCount, L'\0');
+                                (void)immGetCompositionStringW(himc, GCS_COMPSTR, buf.data(), keel::as<DWORD>(byteLen));
+                                const keel::String utf8 = WideToUtf8(buf.data(), keel::as<keel::i32>(wcharCount));
+                                const LONG cursorPos = immGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0u);
+                                const keel::i32 cursorChars = (cursorPos >= 0) ? keel::as<keel::i32>(cursorPos) : keel::as<keel::i32>(wcharCount);
+                                ui->OnTextComposition(utf8.as_ref(), cursorChars, 0);
+                            } else {
+                                ui->OnTextCompositionEnd();
+                            }
+                            (void)immReleaseContext(hWnd, himc);
+                        }
+                    }
+                }
+                break;
+            }
+
+            case WM_IME_ENDCOMPOSITION:
+                if (ui) {
+                    ui->OnTextCompositionEnd();
+                }
+                break;
+
+            case WM_DROPFILES: {
+                HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+                if (hDrop && ui) {
+                    POINT pt{};
+                    (void)::DragQueryPoint(hDrop, &pt);
+                    const UINT count = ::DragQueryFileW(hDrop, 0xFFFFFFFFu, nullptr, 0u);
+                    keel::Array<keel::String> ownedPaths;
+                    keel::Array<keel::StringRef> pathRefs;
+                    ownedPaths.reserve(count);
+                    pathRefs.reserve(count);
+                    for (UINT i = 0u; i < count; ++i) {
+                        const UINT charLen = ::DragQueryFileW(hDrop, i, nullptr, 0u);
+                        if (charLen == 0u) continue;
+                        keel::Array<wchar_t> wbuf(keel::as<keel::usize>(charLen) + 1u, L'\0');
+                        if (::DragQueryFileW(hDrop, i, wbuf.data(), charLen + 1u) > 0u) {
+                            ownedPaths.push_back(WideToUtf8(wbuf.data(), keel::as<keel::i32>(charLen)));
+                        }
+                    }
+                    for (const keel::String& s : ownedPaths) {
+                        pathRefs.push_back(s.as_ref());
+                    }
+                    if (!pathRefs.empty()) {
+                        ui->OnFilesDropped(
+                            pathRefs.as_ref(),
+                            Vec2{keel::as<keel::f32>(pt.x), keel::as<keel::f32>(pt.y)}
+                        );
+                    }
+                }
+                if (hDrop) {
+                    ::DragFinish(hDrop);
+                }
+                return 0;
+            }
+
             case WM_KILLFOCUS:
                 pendingHighSurrogate = 0u;
                 if (ui) {
+                    ui->OnTextCompositionEnd();
                     if (capturedButtons != 0u) {
                         if (capturedButtons & 1u) ui->OnMouseUp(1);
                         if (capturedButtons & 2u) ui->OnMouseUp(2);
@@ -1105,6 +1237,7 @@ bool Win32PlatformWindow::Create(
     }
 
     ApplyDwmDarkTitlebar(m_impl->hwnd);
+    ::DragAcceptFiles(m_impl->hwnd, TRUE);
     if (const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png"); iconAsset && !iconAsset->Empty()) {
         keel::u32 srcW = 0u;
         keel::u32 srcH = 0u;
@@ -1283,6 +1416,19 @@ void Win32PlatformWindow::SetCursor(CursorType cursor) noexcept {
     }
 }
 
+void Win32PlatformWindow::SetTextInputActive(bool active, Rect caretRectPx) noexcept {
+    if (!m_impl || !m_impl->hwnd) return;
+    const bool changed = (active != m_impl->imeActive) ||
+        (active && (keel::abs(caretRectPx.x - m_impl->lastImeCaretPx.x) > 0.5f ||
+                    keel::abs(caretRectPx.y - m_impl->lastImeCaretPx.y) > 0.5f ||
+                    keel::abs(caretRectPx.h - m_impl->lastImeCaretPx.h) > 0.5f));
+    m_impl->imeActive = active;
+    if (active && changed) {
+        m_impl->lastImeCaretPx = caretRectPx;
+        m_impl->UpdateImmCaretPosition(caretRectPx);
+    }
+}
+
 void Win32PlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
     if (url.empty()) return;
     const keel::Array<wchar_t> wideUrl = Utf8ToWideZ(url);
@@ -1320,6 +1466,7 @@ bool Win32PlatformWindow::IsLiveResizeFrame() const noexcept { return false; }
 bool Win32PlatformWindow::IsVsyncEnabled() const noexcept { return true; }
 void Win32PlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void Win32PlatformWindow::SetCursor(CursorType) noexcept {}
+void Win32PlatformWindow::SetTextInputActive(bool, Rect) noexcept {}
 void Win32PlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
 keel::StringRef Win32PlatformWindow::GetPlatformName() const noexcept { return "Win32 (Unavailable)"; }
 
