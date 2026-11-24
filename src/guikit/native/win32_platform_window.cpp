@@ -8,9 +8,18 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#ifdef IsMinimized
+#undef IsMinimized
+#endif
 
 #ifndef WM_DPICHANGED
 #define WM_DPICHANGED 0x02E0
@@ -83,7 +92,7 @@ void* WglProcLoaderThunk(const char* name) noexcept {
     if (!name) return nullptr;
     PROC raw = ::wglGetProcAddress(name);
     const keel::usize addr = reinterpret_cast<keel::usize>(raw);
-    if (addr == 0u || addr == 1u || addr == 2u || addr == 3u || addr == ~keel::usize{0}) {
+    if (addr == 0u || addr == 1u || addr == 2u || addr == 3u || addr == keel::Limits<keel::usize>::kMax) {
         if (!g_opengl32Module) {
             g_opengl32Module = ::GetModuleHandleW(L"opengl32.dll");
             if (!g_opengl32Module) {
@@ -155,7 +164,7 @@ void EnableBestProcessDpiAwareness() noexcept {
         );
         if (setCtx) {
             // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (DPI_AWARENESS_CONTEXT)-4
-            if (setCtx(reinterpret_cast<HANDLE>(keel::as<keel::iptr>(-4)))) {
+            if (setCtx(reinterpret_cast<HANDLE>(keel::as<keel::isize>(-4)))) {
                 return;
             }
         }
