@@ -89,13 +89,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
                         if (guikit::Button(ui, {
                             .text = "Trigger Pulse",
                             .icon = guikit::Icon::Flash(),
-                            .color = guikit::StateColor::Primary()
+                            .variant = guikit::UiVariant::Primary
                         })) {
                             ++pulseCount;
                         }
                         if (guikit::Button(ui, {
                             .text = "Toggle Theme",
-                            .color = guikit::StateColor::Secondary()
+                            .variant = guikit::UiVariant::Secondary
                         })) {
                             darkMode = !darkMode;
                             app.SetShellLightMode(!darkMode);

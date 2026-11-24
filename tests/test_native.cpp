@@ -158,7 +158,7 @@ void main() {
                 ui.BeginFrame({400.0f, 300.0f}, 1.0f);
                 if (auto col = guikit::Column(ui, {.gap = 8.0f, .padding = Padding::All(16.0f)})) {
                     guikit::Heading(ui, {.label = "Native ES3 Smoke Test"});
-                    (void)guikit::Button(ui, {.text = "Click Me", .color = StateColor::Primary()});
+                    (void)guikit::Button(ui, {.text = "Click Me", .variant = UiVariant::Primary});
                     guikit::Tag(ui, "ES3 OK", {.variant = UiVariant::Success});
                 }
                 ui.EndFrame(glCanvas);
