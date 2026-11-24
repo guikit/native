@@ -16,13 +16,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
     });
 
     return app.Run([&](guikit::Context& ui) {
-        if (auto root = ui.Column({
+        if (auto root = guikit::Column(ui, {
             .gap = 0.0f,
             .padding = guikit::Padding::All(0.0f),
             .width = guikit::SizeMode::Stretch,
             .height = guikit::SizeMode::Stretch
         })) {
-            if (auto mb = ui.MenuBar({.style = guikit::MenuBarStyle::Header})) {
+            if (auto mb = guikit::MenuBar(ui, {.style = guikit::MenuBarStyle::Header})) {
                 if (auto file = mb.Menu("File")) {
                     if (file.Item("Reset Telemetry", {.shortcut = "Ctrl+R"})) {
                         thrustPct = 50.0f;
@@ -40,68 +40,68 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 }
             }
 
-            if (auto center = ui.Column({
+            if (auto center = guikit::Column(ui, {
                 .padding = guikit::Padding::All(24.0f),
                 .align = guikit::Alignment::Center,
                 .justify = guikit::Justify::Center,
                 .width = guikit::SizeMode::Stretch,
                 .height = guikit::SizeMode::Stretch
             })) {
-                if (auto card = ui.Card({
+                if (auto card = guikit::Card(ui, {
                     .minWidth = 480.0f,
                     .width = guikit::SizeMode::Fit,
                     .gap = 12.0f,
                     .padding = guikit::Padding::All(20.0f),
                     .elevated = true
                 })) {
-                    ui.Heading({
+                    guikit::Heading(ui, {
                         .label = "GuiKit Native GPU Engine",
                         .description = "X11 + EGL + OpenGL ES 3.0 + FreeType Atlas (0 SDL3, 0 ThorVG)",
                         .icon = guikit::Icon::Play(),
                         .separator = guikit::HeadingSeparator::Bottom
                     });
 
-                    if (auto row = ui.Row({.gap = 8.0f})) {
-                        ui.Tag("OpenGL ES 3.0", {.variant = guikit::UiVariant::Success});
-                        ui.Tag("X11 + EGL", {.variant = guikit::UiVariant::Info});
-                        ui.Tag("Zero SDL3", {.variant = guikit::UiVariant::Primary});
+                    if (auto row = guikit::Row(ui, {.gap = 8.0f})) {
+                        guikit::Tag(ui, "OpenGL ES 3.0", {.variant = guikit::UiVariant::Success});
+                        guikit::Tag(ui, "X11 + EGL", {.variant = guikit::UiVariant::Info});
+                        guikit::Tag(ui, "Zero SDL3", {.variant = guikit::UiVariant::Primary});
                     }
 
-                    if (auto el = ui.Element({
+                    if (auto el = guikit::Element(ui, {
                         .label = "Station Callsign",
                         .description = "Try typing UTF-8 text directly in native X11"
                     })) {
-                        ui.InputField(stationName, {.placeholder = "Enter callsign..."});
+                        guikit::InputField(ui, stationName, {.placeholder = "Enter callsign..."});
                     }
 
-                    if (auto el = ui.Element({
+                    if (auto el = guikit::Element(ui, {
                         .label = "Autopilot Loop",
                         .description = "Closed-loop attitude stabilization"
                     })) {
-                        ui.Switch(autopilot);
+                        guikit::Switch(ui, autopilot);
                     }
 
-                    if (auto el = ui.Element({.label = "Main Thruster Output"})) {
-                        ui.Slider(thrustPct, 0.0f, 100.0f, {.valueFormat = "%.1f %%"});
+                    if (auto el = guikit::Element(ui, {.label = "Main Thruster Output"})) {
+                        guikit::Slider(ui, thrustPct, 0.0f, 100.0f, {.valueFormat = "%.1f %%"});
                     }
 
-                    if (auto row = ui.Row({.gap = 8.0f, .align = guikit::Alignment::Center})) {
-                        if (ui.Button({
+                    if (auto row = guikit::Row(ui, {.gap = 8.0f, .align = guikit::Alignment::Center})) {
+                        if (guikit::Button(ui, {
                             .text = "Trigger Pulse",
                             .icon = guikit::Icon::Flash(),
                             .color = guikit::StateColor::Primary()
                         })) {
                             ++pulseCount;
                         }
-                        if (ui.Button({
+                        if (guikit::Button(ui, {
                             .text = "Toggle Theme",
                             .color = guikit::StateColor::Secondary()
                         })) {
                             darkMode = !darkMode;
                             app.SetShellLightMode(!darkMode);
                         }
-                        ui.Spacer();
-                        ui.Text(ui.Format("Pulses: {}", pulseCount), {
+                        guikit::Spacer(ui);
+                        guikit::Text(ui, ui.Format("Pulses: {}", pulseCount), {
                             .role = guikit::TextRole::CodeMedium,
                             .variant = guikit::UiVariant::Info
                         });
@@ -109,10 +109,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 }
             }
 
-            if (auto sb = ui.StatusBar({})) {
-                ui.Text(app.GetMetrics().GetStatusString(), {.role = guikit::TextRole::BodySmall});
-                ui.Spacer();
-                ui.Text(guikit::native::GetBackendSummary(), {.role = guikit::TextRole::BodySmall, .variant = guikit::UiVariant::Muted});
+            if (auto sb = guikit::StatusBar(ui, {})) {
+                guikit::Text(ui, app.GetMetrics().GetStatusString(), {.role = guikit::TextRole::BodySmall});
+                guikit::Spacer(ui);
+                guikit::Text(ui, guikit::native::GetBackendSummary(), {.role = guikit::TextRole::BodySmall, .variant = guikit::UiVariant::Muted});
             }
         }
     });
