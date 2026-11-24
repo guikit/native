@@ -47,7 +47,7 @@ int main() {
 
     // 2.5. Built-in keel::imagefile decoder in guikit::core (InspectImageFromMemory + DecodeImageFromMemory)
     {
-        RegisterNativeWindowBackend();
+        RegisterNativePlatform();
         const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png");
         CHECK(iconAsset.has_value() && !iconAsset->Empty());
         if (iconAsset && !iconAsset->Empty()) {

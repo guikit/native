@@ -4,8 +4,22 @@ namespace guikit::native {
 
 namespace {
 
-[[nodiscard]] keel::UniquePtr<IWindowBackend> DefaultNativeBackendFactory() {
-    return CreateNativeWindowBackend(NativePlatform::Auto, NativeRenderer::Auto);
+NativePlatform g_registeredPlatform = NativePlatform::Auto;
+NativeRenderer g_registeredRenderer = NativeRenderer::Auto;
+
+[[nodiscard]] keel::UniquePtr<IPlatformWindow> CreateRegisteredNativeWindow() {
+    return CreateNativePlatformWindow(g_registeredPlatform);
+}
+
+[[nodiscard]] keel::UniquePtr<ICanvas> CreateRegisteredNativeCanvas(IPlatformWindow& w) {
+    const bool useEs3 = (g_registeredRenderer == NativeRenderer::Auto ||
+                         g_registeredRenderer == NativeRenderer::OpenGLES3);
+    if (useEs3) {
+        if (auto glCanvas = CreateGlEs3Canvas(w.GetGlProcAddressFn(), true)) {
+            return glCanvas;
+        }
+    }
+    return keel::make_unique<NullCanvas>();
 }
 
 } // namespace
@@ -132,36 +146,20 @@ keel::UniquePtr<ICanvas> CreateGlEs3Canvas(GlProcAddressFn procLoader, bool load
     return canvas;
 }
 
-keel::UniquePtr<IWindowBackend> CreateNativeWindowBackend(
-    NativePlatform platform,
-    NativeRenderer renderer
-) {
-    auto win = CreateNativePlatformWindow(platform);
-    if (!win) {
-        return nullptr;
-    }
-
+void RegisterNativePlatform(NativePlatform platform, NativeRenderer renderer) noexcept {
+    g_registeredPlatform = platform;
+    g_registeredRenderer = renderer;
     const bool useEs3 = (renderer == NativeRenderer::Auto || renderer == NativeRenderer::OpenGLES3);
 #if defined(GUIKIT_NATIVE_HAS_WIN32) && GUIKIT_NATIVE_HAS_WIN32
     const GraphicsApi gfxApi = useEs3 ? GraphicsApi::OpenGL3 : GraphicsApi::None;
 #else
     const GraphicsApi gfxApi = useEs3 ? GraphicsApi::OpenGLES3 : GraphicsApi::None;
 #endif
-
-    PlatformCanvasFactory factory = [useEs3](IPlatformWindow& w) -> keel::UniquePtr<ICanvas> {
-        if (useEs3) {
-            if (auto glCanvas = CreateGlEs3Canvas(w.GetGlProcAddressFn(), true)) {
-                return glCanvas;
-            }
-        }
-        return keel::make_unique<NullCanvas>();
-    };
-
-    return keel::make_unique<PlatformWindowBackend>(keel::move(win), keel::move(factory), gfxApi);
-}
-
-void RegisterNativeWindowBackend() noexcept {
-    RegisterDefaultWindowBackendFactory(&DefaultNativeBackendFactory);
+    RegisterDefaultPlatform(PlatformRegistration{
+        .createWindow = &CreateRegisteredNativeWindow,
+        .createCanvas = &CreateRegisteredNativeCanvas,
+        .graphicsApi = gfxApi
+    });
 }
 
 } // namespace guikit::native

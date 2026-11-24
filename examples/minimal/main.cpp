@@ -1,7 +1,7 @@
 #include "guikit/native.hpp"
 
 int main(int /*argc*/, char* /*argv*/[]) {
-    guikit::native::RegisterNativeWindowBackend();
+    guikit::native::RegisterNativePlatform();
 
     bool autopilot = true;
     bool darkMode = true;

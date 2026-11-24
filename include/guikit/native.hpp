@@ -59,14 +59,10 @@ enum class NativeRenderer : keel::u8 {
     bool loadDefaultFonts = true
 );
 
-/// Creates a ready-to-run `IWindowBackend` (`PlatformWindowBackend`) pairing a native
-/// `IPlatformWindow` with `GlEs3Canvas` (or `NullCanvas`).
-[[nodiscard]] keel::UniquePtr<IWindowBackend> CreateNativeWindowBackend(
+/// Registers the native `IPlatformWindow` + `GlEs3Canvas` pairing as the default `guikit::MainWindow` platform.
+void RegisterNativePlatform(
     NativePlatform platform = NativePlatform::Auto,
     NativeRenderer renderer = NativeRenderer::Auto
-);
-
-/// Registers `CreateNativeWindowBackend()` as the default `guikit::MainWindow` backend factory.
-void RegisterNativeWindowBackend() noexcept;
+) noexcept;
 
 } // namespace guikit::native
