@@ -52,7 +52,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     .width = guikit::SizeMode::Fit,
                     .gap = 12.0f,
                     .padding = guikit::Padding::All(20.0f),
-                    .elevated = true
+                    .surface = guikit::SurfaceRole::Raised
                 })) {
                     guikit::Heading(ui, {
                         .label = "GuiKit Native GPU Engine",
