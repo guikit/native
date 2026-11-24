@@ -6,7 +6,7 @@
 #include "guikit/core/assets.hpp"
 #include "guikit/core/image_cache.hpp"
 #include "guikit/core/text_util.hpp"
-#include "guikit/core/tokens.hpp"
+#include "guikit/style/tokens.hpp"
 #if (defined(GUIKIT_HAS_TEXT_ENGINE) && GUIKIT_HAS_TEXT_ENGINE) || (defined(GUIKIT_HAS_FREETYPE) && GUIKIT_HAS_FREETYPE)
 #define GUIKIT_HAS_TEXT_RASTERIZER 1
 #include "guikit/backend/text_engine.hpp"
