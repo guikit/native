@@ -59,7 +59,9 @@ public:
     [[nodiscard]] keel::StringRef GetBackendName() const noexcept override;
 
     void Clear(Color color, keel::Optional<Rect> rect = keel::kNullOpt) override;
+    [[nodiscard]] bool SupportsRoundedClip() const noexcept override { return true; }
     void PushClip(Rect clipRect) override;
+    void PushRoundedClip(Rect clipRect, keel::f32 cornerRadius) override;
     void PopClip() override;
 
     void DrawRect(Rect rect, Color fill) override;

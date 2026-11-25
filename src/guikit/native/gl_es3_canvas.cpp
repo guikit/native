@@ -64,6 +64,7 @@ uniform vec2 u_Viewport;
 
 out vec2 v_LocalPx;
 out vec2 v_HalfSize;
+out vec2 v_ScreenPx;
 out vec4 v_Uv;
 out vec4 v_Fill;
 out vec4 v_Stroke;
@@ -96,6 +97,7 @@ void main() {
     vec2 center = a_Rect.xy + a_Rect.zw * 0.5;
     v_HalfSize = a_Rect.zw * 0.5;
     v_LocalPx = (mode > 0.5 && mode < 1.5) ? posPx : (posPx - center);
+    v_ScreenPx = posPx;
     v_Uv = ((mode > 0.5 && mode < 1.5) || mode > 5.5) ? a_Uv : vec4(mix(a_Uv.xy, a_Uv.zw, corner), 0.0, 0.0);
     v_Fill = a_Fill;
     v_Stroke = a_Stroke;
@@ -110,12 +112,16 @@ void main() {
 static constexpr const char* kQuadFragBody = R"GLSL(
 in vec2 v_LocalPx;
 in vec2 v_HalfSize;
+in vec2 v_ScreenPx;
 in vec4 v_Uv;
 in vec4 v_Fill;
 in vec4 v_Stroke;
 in vec4 v_Params;
 
 uniform sampler2D u_Tex;
+uniform int u_ClipCount;
+uniform vec4 u_ClipRects[4];
+uniform vec4 u_ClipRadii;
 
 out vec4 FragColor;
 
@@ -123,6 +129,23 @@ float sdRoundedBox(vec2 p, vec2 b, float r) {
     float rr = min(r, min(b.x, b.y));
     vec2 q = abs(p) - b + vec2(rr);
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;
+}
+
+float clipRadiusAt(int idx) {
+    if (idx == 0) return u_ClipRadii.x;
+    if (idx == 1) return u_ClipRadii.y;
+    if (idx == 2) return u_ClipRadii.z;
+    return u_ClipRadii.w;
+}
+
+float computeRoundedClipCov() {
+    float cov = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= u_ClipCount) break;
+        float d = sdRoundedBox(v_ScreenPx - u_ClipRects[i].xy, u_ClipRects[i].zw, clipRadiusAt(i));
+        cov = min(cov, 1.0 - smoothstep(-0.65, 0.65, d));
+    }
+    return cov;
 }
 
 float sdSegment(vec2 p, vec2 a, vec2 b) {
@@ -170,6 +193,12 @@ float roundedBoxShadow(vec2 p, vec2 halfSize, float sigma, float corner) {
 }
 
 void main() {
+    float clipCov = 1.0;
+    if (u_ClipCount > 0) {
+        clipCov = computeRoundedClipCov();
+        if (clipCov <= 0.001) discard;
+    }
+
     float radius = v_Params.x;
     float strokeW = v_Params.y;
     float mode = v_Params.z;
@@ -181,7 +210,7 @@ void main() {
         float outerCov = 1.0 - smoothstep(-aa, aa, d);
         if (outerCov <= 0.001) discard;
 
-        vec4 outCol = vec4(v_Fill.rgb, v_Fill.a * outerCov);
+        vec4 outCol = vec4(v_Fill.rgb, v_Fill.a * outerCov * clipCov);
         if (strokeW > 0.0 && v_Stroke.a > 0.0) {
             float innerD = d + strokeW;
             float fillCov = 1.0 - smoothstep(-aa, aa, innerD);
@@ -190,8 +219,9 @@ void main() {
             vec4 fillLayer = vec4(v_Fill.rgb * v_Fill.a, v_Fill.a) * fillCov;
             vec4 borderLayer = vec4(v_Stroke.rgb * v_Stroke.a, v_Stroke.a) * borderCov;
             vec4 combined = borderLayer + fillLayer * (1.0 - borderLayer.a);
-            if (combined.a <= 0.001) discard;
-            FragColor = vec4(combined.rgb / combined.a, combined.a);
+            float finalA = combined.a * clipCov;
+            if (finalA <= 0.001) discard;
+            FragColor = vec4(combined.rgb / combined.a, finalA);
             return;
         }
         if (outCol.a <= 0.001) discard;
@@ -204,7 +234,7 @@ void main() {
         float halfW = max(strokeW * 0.5, 0.5);
         float d = sdSegment(v_LocalPx, v_Uv.xy, v_Uv.zw) - halfW;
         float cov = 1.0 - smoothstep(-0.65, 0.65, d);
-        float alpha = v_Fill.a * cov;
+        float alpha = v_Fill.a * cov * clipCov;
         if (alpha <= 0.001) discard;
         FragColor = vec4(v_Fill.rgb, alpha);
         return;
@@ -219,7 +249,7 @@ void main() {
             mask = 1.0 - smoothstep(-0.65, 0.65, d);
         }
         vec4 col = texel * v_Fill;
-        col.a *= mask;
+        col.a *= mask * clipCov;
         if (col.a <= 0.001) discard;
         FragColor = col;
         return;
@@ -230,7 +260,7 @@ void main() {
         // v_LocalPx = offset from shadow caster center, v_Uv.xy = caster halfSizePx
         // v_Params = (cornerRadiusPx, sigmaPx, 7.0, 0.0)
         float cov = roundedBoxShadow(v_LocalPx, v_Uv.xy, strokeW, radius);
-        float alpha = v_Fill.a * cov;
+        float alpha = v_Fill.a * cov * clipCov;
         if (alpha <= 0.001) discard;
         FragColor = vec4(v_Fill.rgb, alpha);
         return;
@@ -266,7 +296,7 @@ void main() {
             }
         }
         float cov = 1.0 - smoothstep(-0.65, 0.65, d);
-        float alpha = v_Fill.a * cov;
+        float alpha = v_Fill.a * cov * clipCov;
         if (alpha <= 0.001) discard;
         FragColor = vec4(v_Fill.rgb, alpha);
         return;
@@ -297,7 +327,7 @@ void main() {
             float lightOnDark = pow(cov, 1.0 / 1.8);
             cov = mix(darkOnLight, lightOnDark, luma);
         }
-        FragColor = vec4(v_Fill.rgb, v_Fill.a * cov);
+        FragColor = vec4(v_Fill.rgb, v_Fill.a * cov * clipCov);
         return;
     }
 
@@ -330,7 +360,7 @@ void main() {
         vec3 lightOnDark = pow(max(cov3, vec3(0.0)), vec3(1.0 / 1.8));
         cov3 = mix(darkOnLight, lightOnDark, luma);
     }
-    vec3 effCov = cov3 * v_Fill.a;
+    vec3 effCov = cov3 * (v_Fill.a * clipCov);
     FragColor = vec4(effCov, max(effCov.r, max(effCov.g, effCov.b)));
 }
 )GLSL";
@@ -341,23 +371,53 @@ layout(location = 1) in vec4 a_Color;
 
 uniform vec2 u_Viewport;
 
+out vec2 v_ScreenPx;
 out vec4 v_Color;
 
 void main() {
     vec2 ndc = (a_Pos / max(u_Viewport, vec2(1.0))) * 2.0 - 1.0;
     ndc.y = -ndc.y;
     gl_Position = vec4(ndc, 0.0, 1.0);
+    v_ScreenPx = a_Pos;
     v_Color = a_Color;
 }
 )GLSL";
 
 static constexpr const char* kTriFragBody = R"GLSL(
+in vec2 v_ScreenPx;
 in vec4 v_Color;
+
+uniform int u_ClipCount;
+uniform vec4 u_ClipRects[4];
+uniform vec4 u_ClipRadii;
+
 out vec4 FragColor;
 
+float sdRoundedBox(vec2 p, vec2 b, float r) {
+    float rr = min(r, min(b.x, b.y));
+    vec2 q = abs(p) - b + vec2(rr);
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;
+}
+
+float clipRadiusAt(int idx) {
+    if (idx == 0) return u_ClipRadii.x;
+    if (idx == 1) return u_ClipRadii.y;
+    if (idx == 2) return u_ClipRadii.z;
+    return u_ClipRadii.w;
+}
+
 void main() {
-    if (v_Color.a <= 0.001) discard;
-    FragColor = v_Color;
+    float clipCov = 1.0;
+    if (u_ClipCount > 0) {
+        for (int i = 0; i < 4; ++i) {
+            if (i >= u_ClipCount) break;
+            float d = sdRoundedBox(v_ScreenPx - u_ClipRects[i].xy, u_ClipRects[i].zw, clipRadiusAt(i));
+            clipCov = min(clipCov, 1.0 - smoothstep(-0.65, 0.65, d));
+        }
+    }
+    float alpha = v_Color.a * clipCov;
+    if (alpha <= 0.001) discard;
+    FragColor = vec4(v_Color.rgb, alpha);
 }
 )GLSL";
 
@@ -638,12 +698,18 @@ struct GlEs3Canvas::Impl {
     GLuint quadProg{0};
     GLint quadUniformViewport{-1};
     GLint quadUniformTex{-1};
+    GLint quadUniformClipCount{-1};
+    GLint quadUniformClipRects{-1};
+    GLint quadUniformClipRadii{-1};
     GLuint quadVao{0};
     GLuint quadInstanceVbo{0};
     keel::usize quadVboCapacity{0};
 
     GLuint triProg{0};
     GLint triUniformViewport{-1};
+    GLint triUniformClipCount{-1};
+    GLint triUniformClipRects{-1};
+    GLint triUniformClipRadii{-1};
     GLuint triVao{0};
     GLuint triVbo{0};
     keel::usize triVboCapacity{0};
@@ -710,8 +776,15 @@ struct GlEs3Canvas::Impl {
     keel::f32 scale{1.0f};
     keel::f32 xfScale{1.0f};
     Vec2 xfOffset{0.0f, 0.0f};
+    struct RoundedClipEntry {
+        Rect rect{};
+        keel::f32 radius{0.0f};
+        keel::usize depth{0};
+    };
+
     keel::SmallArray<TransformState, 8> transformStack;
     keel::SmallArray<Rect, 16> clipStack;
+    keel::SmallArray<RoundedClipEntry, 8> roundedClipStack;
     TextRenderSettings textSettings{};
 
 #if GUIKIT_HAS_TEXT_RASTERIZER
@@ -776,7 +849,19 @@ struct GlEs3Canvas::Impl {
 
         quadUniformViewport = gl.GetUniformLocation(quadProg, "u_Viewport");
         quadUniformTex = gl.GetUniformLocation(quadProg, "u_Tex");
+        quadUniformClipCount = gl.GetUniformLocation(quadProg, "u_ClipCount");
+        quadUniformClipRects = gl.GetUniformLocation(quadProg, "u_ClipRects[0]");
+        if (quadUniformClipRects < 0) {
+            quadUniformClipRects = gl.GetUniformLocation(quadProg, "u_ClipRects");
+        }
+        quadUniformClipRadii = gl.GetUniformLocation(quadProg, "u_ClipRadii");
         triUniformViewport = gl.GetUniformLocation(triProg, "u_Viewport");
+        triUniformClipCount = gl.GetUniformLocation(triProg, "u_ClipCount");
+        triUniformClipRects = gl.GetUniformLocation(triProg, "u_ClipRects[0]");
+        if (triUniformClipRects < 0) {
+            triUniformClipRects = gl.GetUniformLocation(triProg, "u_ClipRects");
+        }
+        triUniformClipRadii = gl.GetUniformLocation(triProg, "u_ClipRadii");
 
         // Setup Quad Instanced VAO + VBO
         gl.GenVertexArrays(1, &quadVao);
@@ -1056,6 +1141,35 @@ struct GlEs3Canvas::Impl {
         return gpuPrograms.get(shaderId);
     }
 
+    void UploadRoundedClipUniforms(GLint locCount, GLint locRects, GLint locRadii) {
+        const keel::usize total = roundedClipStack.size();
+        const keel::usize start = (total > 4u) ? (total - 4u) : 0u;
+        const GLint count = keel::as<GLint>(total - start);
+        if (locCount >= 0) {
+            gl.Uniform1i(locCount, count);
+        }
+        if (count > 0) {
+            keel::f32 rects[16]{};
+            keel::f32 radii[4]{};
+            for (GLint i = 0; i < count; ++i) {
+                const RoundedClipEntry& e = roundedClipStack[start + keel::as<keel::usize>(i)];
+                const keel::f32 hw = e.rect.w * 0.5f;
+                const keel::f32 hh = e.rect.h * 0.5f;
+                rects[i * 4 + 0] = e.rect.x + hw;
+                rects[i * 4 + 1] = e.rect.y + hh;
+                rects[i * 4 + 2] = hw;
+                rects[i * 4 + 3] = hh;
+                radii[i] = e.radius;
+            }
+            if (locRects >= 0 && gl.Uniform4fv) {
+                gl.Uniform4fv(locRects, count, rects);
+            }
+            if (locRadii >= 0 && gl.Uniform4f) {
+                gl.Uniform4f(locRadii, radii[0], radii[1], radii[2], radii[3]);
+            }
+        }
+    }
+
     void FlushQuads() {
         if (!initialized || quadBatch.empty()) return;
 
@@ -1070,6 +1184,7 @@ struct GlEs3Canvas::Impl {
         gl.UseProgram(quadProg);
         gl.Uniform2f(quadUniformViewport, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
         gl.Uniform1i(quadUniformTex, 0);
+        UploadRoundedClipUniforms(quadUniformClipCount, quadUniformClipRects, quadUniformClipRadii);
         gl.ActiveTexture(kGlTexture0);
         gl.BindTexture(kGlTexture2D, activeTex ? activeTex : whiteTex);
 
@@ -1094,6 +1209,7 @@ struct GlEs3Canvas::Impl {
 
         gl.UseProgram(triProg);
         gl.Uniform2f(triUniformViewport, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
+        UploadRoundedClipUniforms(triUniformClipCount, triUniformClipRects, triUniformClipRadii);
 
         gl.BindVertexArray(triVao);
         gl.BindBuffer(kGlArrayBuffer, triVbo);
@@ -1489,6 +1605,7 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->xfOffset = {0.0f, 0.0f};
     m_impl->transformStack.clear();
     m_impl->clipStack.clear();
+    m_impl->roundedClipStack.clear();
     m_impl->quadBatch.clear();
     m_impl->triBatch.clear();
     m_impl->activeLcdBlend = false;
@@ -1585,12 +1702,25 @@ void GlEs3Canvas::Clear(Color color, keel::Optional<Rect> rect) {
 }
 
 void GlEs3Canvas::PushClip(Rect clipRect) {
+    PushRoundedClip(clipRect, 0.0f);
+}
+
+void GlEs3Canvas::PushRoundedClip(Rect clipRect, keel::f32 cornerRadius) {
     m_impl->FlushAll();
     const Rect mapped = m_impl->PxRect(clipRect);
+    const keel::f32 rPx = cornerRadius * m_impl->EffScale();
     if (!m_impl->clipStack.empty()) {
         m_impl->clipStack.push_back(m_impl->clipStack.back().Intersect(mapped));
     } else {
         m_impl->clipStack.push_back(mapped);
+    }
+    if (rPx > 0.5f && mapped.w > 0.0f && mapped.h > 0.0f) {
+        const keel::f32 clampedR = keel::min(rPx, keel::min(mapped.w, mapped.h) * 0.5f);
+        m_impl->roundedClipStack.push_back(Impl::RoundedClipEntry{
+            mapped,
+            clampedR,
+            m_impl->clipStack.size()
+        });
     }
     m_impl->ApplyClip();
 }
@@ -1598,7 +1728,11 @@ void GlEs3Canvas::PushClip(Rect clipRect) {
 void GlEs3Canvas::PopClip() {
     if (m_impl->clipStack.empty()) return;
     m_impl->FlushAll();
+    const keel::usize poppedDepth = m_impl->clipStack.size();
     m_impl->clipStack.pop_back();
+    while (!m_impl->roundedClipStack.empty() && m_impl->roundedClipStack.back().depth >= poppedDepth) {
+        m_impl->roundedClipStack.pop_back();
+    }
     m_impl->ApplyClip();
 }
 
