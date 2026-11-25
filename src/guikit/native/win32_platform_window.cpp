@@ -1278,9 +1278,18 @@ bool Win32PlatformWindow::Create(
         [rawHwnd](keel::StringRef txt) { WriteWin32Clipboard(rawHwnd, txt); }
     );
 
-    const keel::i32 showCmd = desc.maximized ? SW_SHOWMAXIMIZED : SW_SHOW;
+    const keel::i32 showCmd = desc.maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
     ::ShowWindow(m_impl->hwnd, showCmd);
+    // Win32 ignores nCmdShow on the process's first ShowWindow() call when the parent
+    // provided STARTF_USESHOWWINDOW (e.g. SW_HIDE or SW_SHOWMINNOACTIVE). Calling it
+    // again when still hidden/iconic guarantees the requested window state is applied.
+    if (!::IsWindowVisible(m_impl->hwnd) || ::IsIconic(m_impl->hwnd)) {
+        ::ShowWindow(m_impl->hwnd, showCmd);
+    }
+    (void)::BringWindowToTop(m_impl->hwnd);
+    (void)::SetForegroundWindow(m_impl->hwnd);
     ::UpdateWindow(m_impl->hwnd);
+    m_impl->minimized = (::IsIconic(m_impl->hwnd) != FALSE);
 
     RECT clientRc{};
     if (::GetClientRect(m_impl->hwnd, &clientRc)) {
