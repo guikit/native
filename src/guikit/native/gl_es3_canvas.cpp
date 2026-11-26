@@ -518,6 +518,221 @@ void main() {
 }
 )GLSL";
 
+static constexpr const char* kFullscreenVertBody = R"GLSL(
+out vec2 v_Uv;
+void main() {
+    vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+    v_Uv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)GLSL";
+
+static constexpr const char* kKawaseDownFragBody = R"GLSL(
+uniform sampler2D u_Tex;
+uniform vec2 u_HalfPixel;
+uniform float u_Offset;
+
+in vec2 v_Uv;
+out vec4 FragColor;
+
+void main() {
+    vec2 o = u_HalfPixel * u_Offset;
+    vec4 sum = texture(u_Tex, v_Uv) * 4.0;
+    sum += texture(u_Tex, v_Uv - o);
+    sum += texture(u_Tex, v_Uv + o);
+    sum += texture(u_Tex, v_Uv + vec2(o.x, -o.y));
+    sum += texture(u_Tex, v_Uv - vec2(o.x, -o.y));
+    FragColor = sum * 0.125;
+}
+)GLSL";
+
+static constexpr const char* kKawaseUpFragBody = R"GLSL(
+uniform sampler2D u_Tex;
+uniform vec2 u_HalfPixel;
+uniform float u_Offset;
+
+in vec2 v_Uv;
+out vec4 FragColor;
+
+void main() {
+    vec2 o = u_HalfPixel * u_Offset;
+    vec4 sum = texture(u_Tex, v_Uv + vec2(-o.x * 2.0, 0.0));
+    sum += texture(u_Tex, v_Uv + vec2(-o.x, o.y)) * 2.0;
+    sum += texture(u_Tex, v_Uv + vec2(0.0, o.y * 2.0));
+    sum += texture(u_Tex, v_Uv + vec2(o.x, o.y)) * 2.0;
+    sum += texture(u_Tex, v_Uv + vec2(o.x * 2.0, 0.0));
+    sum += texture(u_Tex, v_Uv + vec2(o.x, -o.y)) * 2.0;
+    sum += texture(u_Tex, v_Uv + vec2(0.0, -o.y * 2.0));
+    sum += texture(u_Tex, v_Uv + vec2(-o.x, -o.y)) * 2.0;
+    FragColor = sum * (1.0 / 12.0);
+}
+)GLSL";
+
+static constexpr const char* kBlitFragBody = R"GLSL(
+uniform sampler2D u_Tex;
+
+in vec2 v_Uv;
+out vec4 FragColor;
+
+void main() {
+    FragColor = texture(u_Tex, v_Uv);
+}
+)GLSL";
+
+static constexpr const char* kGlassVertBody = R"GLSL(
+uniform vec2 u_Viewport;
+uniform vec4 u_Rect;
+
+out vec2 v_LocalPx;
+out vec2 v_HalfSize;
+out vec2 v_ScreenPx;
+
+void main() {
+    vec2 corner = vec2(
+        (gl_VertexID == 1 || gl_VertexID == 2 || gl_VertexID == 4) ? 1.0 : 0.0,
+        (gl_VertexID == 2 || gl_VertexID == 4 || gl_VertexID == 5) ? 1.0 : 0.0
+    );
+    float pad = 2.0;
+    vec2 pos = u_Rect.xy - vec2(pad) + corner * (u_Rect.zw + vec2(pad * 2.0));
+    vec2 center = u_Rect.xy + u_Rect.zw * 0.5;
+    v_LocalPx = pos - center;
+    v_HalfSize = u_Rect.zw * 0.5;
+    v_ScreenPx = pos;
+    vec2 ndc = vec2(
+        (pos.x / max(u_Viewport.x, 1.0)) * 2.0 - 1.0,
+        1.0 - (pos.y / max(u_Viewport.y, 1.0)) * 2.0
+    );
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+)GLSL";
+
+static constexpr const char* kGlassFragBody = R"GLSL(
+uniform sampler2D u_SceneTex;
+uniform sampler2D u_BlurTex;
+uniform vec2 u_Viewport;
+uniform vec4 u_Tint;
+uniform vec4 u_BorderColor;
+uniform vec4 u_RimColor;
+uniform vec4 u_GlassA; // x=radiusPx, y=borderWidthPx, z=refraction, w=dispersion
+uniform vec4 u_GlassB; // x=rimLight, y=saturation, z=frost, w=dpiScale
+uniform int u_ClipCount;
+uniform vec4 u_ClipRects[4];
+uniform vec4 u_ClipRadii;
+
+in vec2 v_LocalPx;
+in vec2 v_HalfSize;
+in vec2 v_ScreenPx;
+
+out vec4 FragColor;
+
+float sdRoundedBox(vec2 p, vec2 b, float r) {
+    float rr = min(r, min(b.x, b.y));
+    vec2 q = abs(p) - b + vec2(rr);
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;
+}
+
+float clipRadiusAt(int idx) {
+    if (idx == 0) return u_ClipRadii.x;
+    if (idx == 1) return u_ClipRadii.y;
+    if (idx == 2) return u_ClipRadii.z;
+    return u_ClipRadii.w;
+}
+
+float computeRoundedClipCov() {
+    float cov = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= u_ClipCount) break;
+        float d = sdRoundedBox(v_ScreenPx - u_ClipRects[i].xy, u_ClipRects[i].zw, clipRadiusAt(i));
+        cov = min(cov, 1.0 - smoothstep(-0.65, 0.65, d));
+    }
+    return cov;
+}
+
+void main() {
+    float clipCov = 1.0;
+    if (u_ClipCount > 0) {
+        clipCov = computeRoundedClipCov();
+        if (clipCov <= 0.001) discard;
+    }
+
+    float r = min(u_GlassA.x, min(v_HalfSize.x, v_HalfSize.y));
+    float d = sdRoundedBox(v_LocalPx, v_HalfSize, r);
+    float fillCov = 1.0 - smoothstep(-0.65, 0.65, d);
+    float outAlpha = fillCov * clipCov;
+    if (outAlpha <= 0.001) discard;
+
+    // Analytical outward normal to the rounded-rect perimeter (top-down screen space)
+    vec2 q = abs(v_LocalPx) - (v_HalfSize - vec2(r));
+    vec2 s = vec2(v_LocalPx.x >= 0.0 ? 1.0 : -1.0, v_LocalPx.y >= 0.0 ? 1.0 : -1.0);
+    vec2 grad;
+    if (q.x > 0.0 && q.y > 0.0) {
+        grad = s * normalize(q + vec2(1e-5));
+    } else if (q.x > q.y) {
+        grad = vec2(s.x, 0.0);
+    } else {
+        grad = vec2(0.0, s.y);
+    }
+
+    float dpi = max(u_GlassB.w, 0.5);
+    float rimPx = clamp(min(v_HalfSize.x, v_HalfSize.y) * 0.42, 4.0, 20.0 * dpi);
+    float edgeT = clamp(1.0 + d / rimPx, 0.0, 1.0);
+    float lensCurve = edgeT * edgeT * (3.0 - 2.0 * edgeT);
+
+    vec2 baseUv = vec2(
+        v_ScreenPx.x / max(u_Viewport.x, 1.0),
+        1.0 - v_ScreenPx.y / max(u_Viewport.y, 1.0)
+    );
+    vec2 uvNormal = vec2(grad.x, -grad.y);
+    float refractPx = u_GlassA.z * 14.0 * dpi * lensCurve;
+    vec2 refractUv = -uvNormal * (refractPx / max(u_Viewport, vec2(1.0)));
+    vec2 dispUv = uvNormal * (u_GlassA.w * 3.5 * dpi * lensCurve / max(u_Viewport, vec2(1.0)));
+
+    vec2 uvC = clamp(baseUv + refractUv, vec2(0.001), vec2(0.999));
+    vec2 uvR = clamp(uvC + dispUv, vec2(0.001), vec2(0.999));
+    vec2 uvB = clamp(uvC - dispUv, vec2(0.001), vec2(0.999));
+
+    vec3 sharpCol = vec3(
+        texture(u_SceneTex, uvR).r,
+        texture(u_SceneTex, uvC).g,
+        texture(u_SceneTex, uvB).b
+    );
+    vec3 blurCol = vec3(
+        texture(u_BlurTex, uvR).r,
+        texture(u_BlurTex, uvC).g,
+        texture(u_BlurTex, uvB).b
+    );
+
+    float frost = clamp(u_GlassB.z, 0.0, 1.0);
+    vec3 backdrop = mix(sharpCol, blurCol, frost);
+
+    // Saturation boost so frosted backdrop colors stay luminous rather than muddy gray
+    float luma = dot(backdrop, vec3(0.2126, 0.7152, 0.0722));
+    backdrop = clamp(mix(vec3(luma), backdrop, u_GlassB.y), 0.0, 1.0);
+
+    // Apply palette-derived translucent surface tint
+    vec3 col = mix(backdrop, u_Tint.rgb, u_Tint.a);
+
+    // Directional top-left specular rim highlight + soft bottom-right bounce
+    vec2 lightDir = normalize(vec2(-0.65, -0.76));
+    float ndl = dot(grad, lightDir);
+    float rimBand = smoothstep(0.55, 1.0, edgeT);
+    float topLeftSpec = pow(max(ndl, 0.0), 1.6) * rimBand;
+    float botRightBounce = pow(max(-ndl, 0.0), 2.2) * rimBand * 0.35;
+    float specAmt = clamp((topLeftSpec + botRightBounce) * u_GlassB.x * 0.72, 0.0, 0.85);
+    col = mix(col, u_RimColor.rgb, specAmt);
+
+    // Crisp hairline glass border
+    float bw = u_GlassA.y;
+    if (bw > 0.0 && u_BorderColor.a > 0.0) {
+        float innerD = d + bw;
+        float borderCov = clamp(fillCov - (1.0 - smoothstep(-0.65, 0.65, innerD)), 0.0, 1.0);
+        col = mix(col, u_BorderColor.rgb, borderCov * u_BorderColor.a);
+    }
+
+    FragColor = vec4(col, outAlpha);
+}
+)GLSL";
+
 static constexpr const char* kPassVertBody = R"GLSL(
 layout(location = 0) in vec2 a_uv;
 out vec2 v_uv;
@@ -899,7 +1114,14 @@ struct GlEs3Canvas::Impl {
         }
     };
 
-    enum class BatchKind : keel::u8 { Rects = 0, Quads = 1, Tris = 2 };
+    enum class BatchKind : keel::u8 { Rects = 0, Quads = 1, Tris = 2, Glass = 3 };
+
+    struct GlassDrawCmd {
+        Rect rectPx{};
+        keel::f32 radiusPx{0.0f};
+        GlassParams params{};
+        keel::f32 effScale{1.0f};
+    };
 
     struct DrawBatch {
         BatchKind kind{BatchKind::Quads};
@@ -910,7 +1132,62 @@ struct GlEs3Canvas::Impl {
         keel::u32 lcdRgbKey{0u};
         ScissorState scissor{};
         keel::u16 roundedClipIdx{0u};
+        Rect boundsPx{};
     };
+
+    // Lazy GPU backdrop-blur & Glass SDF pipeline resources (0 VRAM / 0 cost when unused)
+    static constexpr keel::usize kBlurLevels = 3u;
+    static constexpr keel::u32 kMaxBlurCapturesPerFrame = 24u;
+    bool fboSupported{false};
+    bool glassInitFailed{false};
+    bool usedGlassPrevFrame{false};
+    bool usedGlassThisFrame{false};
+    bool renderingToSceneFbo{false};
+    bool blurValid{false};
+    bool backdropDirtyAny{false};
+    Rect dirtyBackdropPx{};
+    Rect validBlurRectPx{};
+    keel::u32 blurCapturesThisFrame{0};
+
+    keel::u32 glassFbW{0};
+    keel::u32 glassFbH{0};
+    GLuint emptyVao{0};
+    GLuint sceneFbo{0};
+    GLuint sceneTex{0};
+    GLuint sceneStencilRbo{0};
+    GLuint sceneSnapFbo{0};
+    GLuint sceneSnapTex{0};
+    GLuint blurFbo[kBlurLevels]{};
+    GLuint blurTex[kBlurLevels]{};
+    keel::u32 blurW[kBlurLevels]{};
+    keel::u32 blurH[kBlurLevels]{};
+
+    GLuint kawaseDownProg{0};
+    GLint kawaseDownLocTex{-1};
+    GLint kawaseDownLocHalfPx{-1};
+    GLint kawaseDownLocOffset{-1};
+
+    GLuint kawaseUpProg{0};
+    GLint kawaseUpLocTex{-1};
+    GLint kawaseUpLocHalfPx{-1};
+    GLint kawaseUpLocOffset{-1};
+
+    GLuint blitProg{0};
+    GLint blitLocTex{-1};
+
+    GLuint glassProg{0};
+    GLint glassLocViewport{-1};
+    GLint glassLocRect{-1};
+    GLint glassLocSceneTex{-1};
+    GLint glassLocBlurTex{-1};
+    GLint glassLocTint{-1};
+    GLint glassLocBorderColor{-1};
+    GLint glassLocRimColor{-1};
+    GLint glassLocA{-1};
+    GLint glassLocB{-1};
+    GLint glassLocClipCount{-1};
+    GLint glassLocClipRects{-1};
+    GLint glassLocClipRadii{-1};
 
     static constexpr keel::usize kTimerQueryCount = 4u;
     bool timerQueriesSupported{false};
@@ -924,6 +1201,7 @@ struct GlEs3Canvas::Impl {
 
     keel::Array<QuadInstance> frameQuads;
     keel::Array<TriVertex> frameTris;
+    keel::Array<GlassDrawCmd> frameGlass;
     keel::Array<DrawBatch> drawBatches;
     keel::Array<RoundedClipSnapshot> roundedClipTable;
     ScissorState curScissor{};
@@ -1149,8 +1427,342 @@ struct GlEs3Canvas::Impl {
             timerQueriesSupported = (timerQueries[0] != 0u);
         }
 
+        fboSupported = gl.HasFramebufferOps();
         initialized = true;
         return true;
+    }
+
+    static Rect UnionRect(Rect a, Rect b) noexcept {
+        if (b.w <= 0.0f || b.h <= 0.0f) return a;
+        if (a.w <= 0.0f || a.h <= 0.0f) return b;
+        const keel::f32 x0 = keel::min(a.x, b.x);
+        const keel::f32 y0 = keel::min(a.y, b.y);
+        const keel::f32 x1 = keel::max(a.Right(), b.Right());
+        const keel::f32 y1 = keel::max(a.Bottom(), b.Bottom());
+        return Rect(x0, y0, x1 - x0, y1 - y0);
+    }
+
+    static bool RectContainsRect(Rect outer, Rect inner) noexcept {
+        if (outer.w <= 0.0f || outer.h <= 0.0f) return false;
+        return outer.x <= inner.x + 0.5f &&
+               outer.y <= inner.y + 0.5f &&
+               outer.Right() >= inner.Right() - 0.5f &&
+               outer.Bottom() >= inner.Bottom() - 0.5f;
+    }
+
+    static bool RectsOverlap(Rect a, Rect b) noexcept {
+        if (a.w <= 0.0f || a.h <= 0.0f || b.w <= 0.0f || b.h <= 0.0f) return false;
+        return a.x < b.Right() && a.Right() > b.x && a.y < b.Bottom() && a.Bottom() > b.y;
+    }
+
+    void MarkBackdropDirty(Rect r) noexcept {
+        if (!renderingToSceneFbo) return;
+        dirtyBackdropPx = UnionRect(dirtyBackdropPx, r);
+        backdropDirtyAny = (dirtyBackdropPx.w > 0.0f && dirtyBackdropPx.h > 0.0f);
+    }
+
+    void MarkBackdropDirtyFull() noexcept {
+        if (!renderingToSceneFbo) return;
+        dirtyBackdropPx = Rect(0.0f, 0.0f, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
+        backdropDirtyAny = true;
+        blurValid = false;
+    }
+
+    void ReleaseGlassFbos() noexcept {
+        if (gl.DeleteFramebuffers) {
+            if (sceneFbo != 0u) gl.DeleteFramebuffers(1, &sceneFbo);
+            if (sceneSnapFbo != 0u) gl.DeleteFramebuffers(1, &sceneSnapFbo);
+            for (keel::usize i = 0u; i < kBlurLevels; ++i) {
+                if (blurFbo[i] != 0u) gl.DeleteFramebuffers(1, &blurFbo[i]);
+                blurFbo[i] = 0u;
+            }
+        }
+        if (gl.DeleteRenderbuffers && sceneStencilRbo != 0u) {
+            gl.DeleteRenderbuffers(1, &sceneStencilRbo);
+        }
+        if (gl.DeleteTextures) {
+            if (sceneTex != 0u) gl.DeleteTextures(1, &sceneTex);
+            if (sceneSnapTex != 0u) gl.DeleteTextures(1, &sceneSnapTex);
+            for (keel::usize i = 0u; i < kBlurLevels; ++i) {
+                if (blurTex[i] != 0u) gl.DeleteTextures(1, &blurTex[i]);
+                blurTex[i] = 0u;
+                blurW[i] = 0u;
+                blurH[i] = 0u;
+            }
+        }
+        sceneFbo = sceneTex = sceneStencilRbo = sceneSnapFbo = sceneSnapTex = 0u;
+        glassFbW = glassFbH = 0u;
+        blurValid = false;
+        validBlurRectPx = {};
+    }
+
+    void ReleaseGlassAll() noexcept {
+        ReleaseGlassFbos();
+        if (gl.DeleteVertexArrays && emptyVao != 0u) gl.DeleteVertexArrays(1, &emptyVao);
+        if (gl.DeleteProgram) {
+            if (kawaseDownProg != 0u) gl.DeleteProgram(kawaseDownProg);
+            if (kawaseUpProg != 0u) gl.DeleteProgram(kawaseUpProg);
+            if (blitProg != 0u) gl.DeleteProgram(blitProg);
+            if (glassProg != 0u) gl.DeleteProgram(glassProg);
+        }
+        emptyVao = kawaseDownProg = kawaseUpProg = blitProg = glassProg = 0u;
+    }
+
+    [[nodiscard]] bool CreateColorFbo(GLuint& outFbo, GLuint& outTex, keel::u32 w, keel::u32 h, GLuint* outStencilRbo = nullptr) noexcept {
+        gl.GenTextures(1, &outTex);
+        gl.ActiveTexture(kGlTexture0);
+        gl.BindTexture(kGlTexture2D, outTex);
+        gl.TexParameteri(kGlTexture2D, kGlTextureMinFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureMagFilter, keel::as<GLint>(kGlLinear));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapS, keel::as<GLint>(kGlClampToEdge));
+        gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
+        gl.TexImage2D(
+            kGlTexture2D,
+            0,
+            keel::as<GLint>(kGlRgba8),
+            keel::as<GLsizei>(w),
+            keel::as<GLsizei>(h),
+            0,
+            kGlRgba,
+            kGlUnsignedByte,
+            nullptr
+        );
+
+        gl.GenFramebuffers(1, &outFbo);
+        gl.BindFramebuffer(kGlFramebuffer, outFbo);
+        gl.FramebufferTexture2D(kGlFramebuffer, kGlColorAttachment0, kGlTexture2D, outTex, 0);
+
+        if (outStencilRbo != nullptr && stencilBits > 0) {
+            gl.GenRenderbuffers(1, outStencilRbo);
+            gl.BindRenderbuffer(kGlRenderbuffer, *outStencilRbo);
+            gl.RenderbufferStorage(kGlRenderbuffer, kGlStencilIndex8, keel::as<GLsizei>(w), keel::as<GLsizei>(h));
+            gl.FramebufferRenderbuffer(kGlFramebuffer, kGlStencilAttachment, kGlRenderbuffer, *outStencilRbo);
+            gl.BindRenderbuffer(kGlRenderbuffer, 0u);
+        }
+
+        const GLenum status = gl.CheckFramebufferStatus(kGlFramebuffer);
+        gl.BindFramebuffer(kGlFramebuffer, 0u);
+        gl.BindTexture(kGlTexture2D, 0u);
+        return status == kGlFramebufferComplete;
+    }
+
+    [[nodiscard]] bool EnsureGlassResources() noexcept {
+        if (!initialized || !fboSupported || glassInitFailed || fbWidth == 0u || fbHeight == 0u) {
+            return false;
+        }
+        if (emptyVao == 0u) {
+            gl.GenVertexArrays(1, &emptyVao);
+        }
+        if (glassProg == 0u) {
+            kawaseDownProg = LinkProgram(gl, isDesktopGl, kFullscreenVertBody, kKawaseDownFragBody);
+            kawaseUpProg = LinkProgram(gl, isDesktopGl, kFullscreenVertBody, kKawaseUpFragBody);
+            blitProg = LinkProgram(gl, isDesktopGl, kFullscreenVertBody, kBlitFragBody);
+            glassProg = LinkProgram(gl, isDesktopGl, kGlassVertBody, kGlassFragBody);
+            if (kawaseDownProg == 0u || kawaseUpProg == 0u || blitProg == 0u || glassProg == 0u) {
+                ReleaseGlassAll();
+                glassInitFailed = true;
+                return false;
+            }
+            kawaseDownLocTex = gl.GetUniformLocation(kawaseDownProg, "u_Tex");
+            kawaseDownLocHalfPx = gl.GetUniformLocation(kawaseDownProg, "u_HalfPixel");
+            kawaseDownLocOffset = gl.GetUniformLocation(kawaseDownProg, "u_Offset");
+
+            kawaseUpLocTex = gl.GetUniformLocation(kawaseUpProg, "u_Tex");
+            kawaseUpLocHalfPx = gl.GetUniformLocation(kawaseUpProg, "u_HalfPixel");
+            kawaseUpLocOffset = gl.GetUniformLocation(kawaseUpProg, "u_Offset");
+
+            blitLocTex = gl.GetUniformLocation(blitProg, "u_Tex");
+
+            glassLocViewport = gl.GetUniformLocation(glassProg, "u_Viewport");
+            glassLocRect = gl.GetUniformLocation(glassProg, "u_Rect");
+            glassLocSceneTex = gl.GetUniformLocation(glassProg, "u_SceneTex");
+            glassLocBlurTex = gl.GetUniformLocation(glassProg, "u_BlurTex");
+            glassLocTint = gl.GetUniformLocation(glassProg, "u_Tint");
+            glassLocBorderColor = gl.GetUniformLocation(glassProg, "u_BorderColor");
+            glassLocRimColor = gl.GetUniformLocation(glassProg, "u_RimColor");
+            glassLocA = gl.GetUniformLocation(glassProg, "u_GlassA");
+            glassLocB = gl.GetUniformLocation(glassProg, "u_GlassB");
+            glassLocClipCount = gl.GetUniformLocation(glassProg, "u_ClipCount");
+            glassLocClipRects = gl.GetUniformLocation(glassProg, "u_ClipRects[0]");
+            if (glassLocClipRects < 0) {
+                glassLocClipRects = gl.GetUniformLocation(glassProg, "u_ClipRects");
+            }
+            glassLocClipRadii = gl.GetUniformLocation(glassProg, "u_ClipRadii");
+        }
+
+        if (sceneFbo == 0u || glassFbW != fbWidth || glassFbH != fbHeight) {
+            ReleaseGlassFbos();
+            bool ok = CreateColorFbo(sceneFbo, sceneTex, fbWidth, fbHeight, &sceneStencilRbo);
+            ok = ok && CreateColorFbo(sceneSnapFbo, sceneSnapTex, fbWidth, fbHeight, nullptr);
+            keel::u32 lw = fbWidth;
+            keel::u32 lh = fbHeight;
+            for (keel::usize i = 0u; i < kBlurLevels && ok; ++i) {
+                lw = keel::max<keel::u32>(1u, lw >> 1u);
+                lh = keel::max<keel::u32>(1u, lh >> 1u);
+                blurW[i] = lw;
+                blurH[i] = lh;
+                ok = CreateColorFbo(blurFbo[i], blurTex[i], lw, lh, nullptr);
+            }
+            if (!ok) {
+                ReleaseGlassFbos();
+                glassInitFailed = true;
+                return false;
+            }
+            glassFbW = fbWidth;
+            glassFbH = fbHeight;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool EnsureSceneFboActive(bool blitExistingFromDefault) noexcept {
+        if (renderingToSceneFbo) {
+            return true;
+        }
+        if (!EnsureGlassResources()) {
+            return false;
+        }
+        if (blitExistingFromDefault) {
+            gl.Disable(kGlScissorTest);
+            gl.BindFramebuffer(kGlReadFramebuffer, 0u);
+            gl.BindFramebuffer(kGlDrawFramebuffer, sceneFbo);
+            gl.BlitFramebuffer(
+                0, 0, keel::as<GLint>(fbWidth), keel::as<GLint>(fbHeight),
+                0, 0, keel::as<GLint>(fbWidth), keel::as<GLint>(fbHeight),
+                kGlColorBufferBit,
+                kGlNearest
+            );
+        }
+        gl.BindFramebuffer(kGlFramebuffer, sceneFbo);
+        gl.Viewport(0, 0, keel::as<GLsizei>(fbWidth), keel::as<GLsizei>(fbHeight));
+        renderingToSceneFbo = true;
+        dirtyBackdropPx = Rect(0.0f, 0.0f, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
+        backdropDirtyAny = true;
+        blurValid = false;
+        validBlurRectPx = {};
+        return true;
+    }
+
+    void RunDualKawaseBlur(Rect regionPx, keel::f32 blurRadiusPx, bool fullScreen) noexcept {
+        if (!renderingToSceneFbo || sceneFbo == 0u || sceneSnapFbo == 0u) return;
+
+        const keel::f32 fbWf = keel::as<keel::f32>(fbWidth);
+        const keel::f32 fbHf = keel::as<keel::f32>(fbHeight);
+        const keel::f32 padPx = keel::max(24.0f, blurRadiusPx * 2.0f);
+        Rect snapPx = fullScreen
+            ? Rect(0.0f, 0.0f, fbWf, fbHf)
+            : Rect(
+                keel::max(0.0f, regionPx.x - padPx),
+                keel::max(0.0f, regionPx.y - padPx),
+                0.0f,
+                0.0f
+            );
+        if (!fullScreen) {
+            const keel::f32 x1 = keel::min(fbWf, regionPx.Right() + padPx);
+            const keel::f32 y1 = keel::min(fbHf, regionPx.Bottom() + padPx);
+            snapPx.w = keel::max(1.0f, x1 - snapPx.x);
+            snapPx.h = keel::max(1.0f, y1 - snapPx.y);
+        }
+
+        // 1. Copy clean backdrop snapshot from sceneFbo -> sceneSnapFbo (zero texture feedback loop)
+        const GLint bx0 = keel::max(0, keel::floor_i32(snapPx.x));
+        const GLint bx1 = keel::min(keel::as<GLint>(fbWidth), keel::ceil_i32(snapPx.Right()));
+        const GLint by0 = keel::max(0, keel::as<GLint>(fbHeight) - keel::ceil_i32(snapPx.Bottom()));
+        const GLint by1 = keel::min(keel::as<GLint>(fbHeight), keel::as<GLint>(fbHeight) - keel::floor_i32(snapPx.y));
+        if (bx1 <= bx0 || by1 <= by0) return;
+
+        gl.Disable(kGlScissorTest);
+        gl.Disable(kGlBlend);
+        gl.Disable(kGlStencilTest);
+
+        gl.BindFramebuffer(kGlReadFramebuffer, sceneFbo);
+        gl.BindFramebuffer(kGlDrawFramebuffer, sceneSnapFbo);
+        gl.BlitFramebuffer(bx0, by0, bx1, by1, bx0, by0, bx1, by1, kGlColorBufferBit, kGlNearest);
+
+        const keel::f32 offset = keel::clamp(blurRadiusPx * 0.14f, 0.85f, 2.8f);
+        gl.BindVertexArray(emptyVao);
+        gl.ActiveTexture(kGlTexture0);
+
+        auto applyLevelScissor = [&](keel::u32 lvlW, keel::u32 lvlH, keel::f32 extraTexels) noexcept {
+            if (fullScreen) {
+                gl.Disable(kGlScissorTest);
+                return;
+            }
+            const keel::f32 sx = keel::as<keel::f32>(lvlW) / keel::max(1.0f, fbWf);
+            const keel::f32 sy = keel::as<keel::f32>(lvlH) / keel::max(1.0f, fbHf);
+            const GLint x0 = keel::max(0, keel::floor_i32(snapPx.x * sx - extraTexels));
+            const GLint x1 = keel::min(keel::as<GLint>(lvlW), keel::ceil_i32(snapPx.Right() * sx + extraTexels));
+            const GLint yTop0 = keel::max(0, keel::floor_i32(snapPx.y * sy - extraTexels));
+            const GLint yTop1 = keel::min(keel::as<GLint>(lvlH), keel::ceil_i32(snapPx.Bottom() * sy + extraTexels));
+            const GLint glY = keel::max(0, keel::as<GLint>(lvlH) - yTop1);
+            gl.Enable(kGlScissorTest);
+            gl.Scissor(x0, glY, keel::max(1, x1 - x0), keel::max(1, yTop1 - yTop0));
+        };
+
+        // 2. Dual-Kawase Downsample: sceneSnapTex -> blur[0] -> blur[1] -> blur[2]
+        gl.UseProgram(kawaseDownProg);
+        gl.Uniform1i(kawaseDownLocTex, 0);
+        gl.Uniform1f(kawaseDownLocOffset, offset);
+        GLuint srcTex = sceneSnapTex;
+        keel::u32 srcW = fbWidth;
+        keel::u32 srcH = fbHeight;
+        for (keel::usize i = 0u; i < kBlurLevels; ++i) {
+            gl.BindFramebuffer(kGlFramebuffer, blurFbo[i]);
+            gl.Viewport(0, 0, keel::as<GLsizei>(blurW[i]), keel::as<GLsizei>(blurH[i]));
+            applyLevelScissor(blurW[i], blurH[i], 10.0f - keel::as<keel::f32>(i) * 2.0f);
+            gl.BindTexture(kGlTexture2D, srcTex);
+            gl.Uniform2f(kawaseDownLocHalfPx, 0.5f / keel::as<keel::f32>(srcW), 0.5f / keel::as<keel::f32>(srcH));
+            gl.DrawArrays(kGlTriangles, 0, 3);
+            srcTex = blurTex[i];
+            srcW = blurW[i];
+            srcH = blurH[i];
+        }
+
+        // 3. Dual-Kawase Upsample: blur[2] -> blur[1] -> blur[0]
+        gl.UseProgram(kawaseUpProg);
+        gl.Uniform1i(kawaseUpLocTex, 0);
+        gl.Uniform1f(kawaseUpLocOffset, offset);
+        for (keel::usize i = kBlurLevels - 1u; i > 0u; --i) {
+            const keel::usize dst = i - 1u;
+            gl.BindFramebuffer(kGlFramebuffer, blurFbo[dst]);
+            gl.Viewport(0, 0, keel::as<GLsizei>(blurW[dst]), keel::as<GLsizei>(blurH[dst]));
+            applyLevelScissor(blurW[dst], blurH[dst], 4.0f);
+            gl.BindTexture(kGlTexture2D, blurTex[i]);
+            gl.Uniform2f(kawaseUpLocHalfPx, 0.5f / keel::as<keel::f32>(blurW[i]), 0.5f / keel::as<keel::f32>(blurH[i]));
+            gl.DrawArrays(kGlTriangles, 0, 3);
+        }
+
+        // 4. Restore sceneFbo render state
+        gl.Disable(kGlScissorTest);
+        gl.BindFramebuffer(kGlFramebuffer, sceneFbo);
+        gl.Viewport(0, 0, keel::as<GLsizei>(fbWidth), keel::as<GLsizei>(fbHeight));
+        gl.Enable(kGlBlend);
+        gl.BlendEquation(kGlFuncAdd);
+        gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+
+        blurValid = true;
+        validBlurRectPx = fullScreen ? Rect(0.0f, 0.0f, fbWf, fbHf) : regionPx;
+        dirtyBackdropPx = {};
+        backdropDirtyAny = false;
+        ++blurCapturesThisFrame;
+    }
+
+    void PresentSceneFboToDefault() noexcept {
+        if (!renderingToSceneFbo || sceneTex == 0u || blitProg == 0u) return;
+        gl.Disable(kGlScissorTest);
+        gl.Disable(kGlBlend);
+        gl.Disable(kGlStencilTest);
+        gl.BindFramebuffer(kGlFramebuffer, 0u);
+        gl.Viewport(0, 0, keel::as<GLsizei>(fbWidth), keel::as<GLsizei>(fbHeight));
+        gl.UseProgram(blitProg);
+        gl.BindVertexArray(emptyVao);
+        gl.ActiveTexture(kGlTexture0);
+        gl.BindTexture(kGlTexture2D, sceneTex);
+        gl.Uniform1i(blitLocTex, 0);
+        gl.DrawArrays(kGlTriangles, 0, 3);
+        gl.BindTexture(kGlTexture2D, 0u);
+        gl.Enable(kGlBlend);
+        gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+        renderingToSceneFbo = false;
     }
 
     void ReleaseGpuPassCaches() noexcept {
@@ -1202,6 +1814,7 @@ struct GlEs3Canvas::Impl {
         }
         ReleaseGpuPassCaches();
         ReleaseImageCache();
+        ReleaseGlassAll();
         if (timerQueriesSupported && gl.DeleteQueries) {
             gl.DeleteQueries(keel::as<GLsizei>(kTimerQueryCount), timerQueries);
         }
@@ -1453,8 +2066,13 @@ struct GlEs3Canvas::Impl {
         if (!initialized || drawBatches.empty()) {
             frameQuads.clear();
             frameTris.clear();
+            frameGlass.clear();
             drawBatches.clear();
             return;
+        }
+
+        if (!frameGlass.empty() && !renderingToSceneFbo) {
+            (void)EnsureSceneFboActive(/*blitExistingFromDefault=*/true);
         }
 
         if (!frameQuads.empty()) {
@@ -1490,6 +2108,7 @@ struct GlEs3Canvas::Impl {
             keel::u16 rectClipIdx{0xFFFFu};
             keel::u16 quadClipIdx{0xFFFFu};
             keel::u16 triClipIdx{0xFFFFu};
+            keel::u16 glassClipIdx{0xFFFFu};
             keel::usize quadBaseBytes{keel::Limits<keel::usize>::kMax};
 
             void BindQuadAttribs(keel::u32 firstQuad) noexcept {
@@ -1608,10 +2227,93 @@ struct GlEs3Canvas::Impl {
                 }
                 impl.gl.DrawArrays(kGlTriangles, keel::as<GLint>(b.first), keel::as<GLsizei>(b.count));
             }
+
+            void ReplayGlass(const DrawBatch& b) noexcept {
+                if (!impl.renderingToSceneFbo || impl.glassProg == 0u || b.first >= impl.frameGlass.size()) {
+                    return;
+                }
+                const GlassDrawCmd& cmd = impl.frameGlass[b.first];
+                const keel::f32 blurRadiusPx = keel::max(2.0f, cmd.params.blurRadius * cmd.effScale);
+                const keel::f32 pad = blurRadiusPx * 1.25f + 8.0f;
+                const Rect needPx(
+                    keel::max(0.0f, cmd.rectPx.x - pad),
+                    keel::max(0.0f, cmd.rectPx.y - pad),
+                    keel::min(vpW, cmd.rectPx.Right() + pad) - keel::max(0.0f, cmd.rectPx.x - pad),
+                    keel::min(vpH, cmd.rectPx.Bottom() + pad) - keel::max(0.0f, cmd.rectPx.y - pad)
+                );
+
+                const bool needCapture =
+                    !impl.blurValid ||
+                    !Impl::RectContainsRect(impl.validBlurRectPx, needPx) ||
+                    (impl.backdropDirtyAny && Impl::RectsOverlap(impl.dirtyBackdropPx, needPx));
+                if (needCapture && impl.blurCapturesThisFrame < Impl::kMaxBlurCapturesPerFrame) {
+                    const bool fullScreen = (impl.blurCapturesThisFrame == 0u);
+                    impl.RunDualKawaseBlur(needPx, blurRadiusPx, fullScreen);
+                    prog = 0u;
+                    vao = 0u;
+                    tex = 0u;
+                    lcd = false;
+                    scissorKnown = false;
+                    rectClipIdx = 0xFFFFu;
+                    quadClipIdx = 0xFFFFu;
+                    triClipIdx = 0xFFFFu;
+                    glassClipIdx = 0xFFFFu;
+                    quadBaseBytes = keel::Limits<keel::usize>::kMax;
+                }
+
+                SetScissor(b.scissor);
+                SetBlend(false, 0u);
+                if (prog != impl.glassProg) {
+                    impl.gl.UseProgram(impl.glassProg);
+                    impl.gl.Uniform2f(impl.glassLocViewport, vpW, vpH);
+                    impl.gl.Uniform1i(impl.glassLocSceneTex, 0);
+                    impl.gl.Uniform1i(impl.glassLocBlurTex, 1);
+                    prog = impl.glassProg;
+                }
+                if (b.roundedClipIdx != glassClipIdx) {
+                    const keel::usize idx = (b.roundedClipIdx < impl.roundedClipTable.size()) ? b.roundedClipIdx : 0u;
+                    impl.UploadRoundedClipSnapshot(
+                        impl.roundedClipTable[idx],
+                        impl.glassLocClipCount,
+                        impl.glassLocClipRects,
+                        impl.glassLocClipRadii
+                    );
+                    glassClipIdx = b.roundedClipIdx;
+                }
+                impl.gl.ActiveTexture(kGlTexture0);
+                impl.gl.BindTexture(kGlTexture2D, impl.sceneSnapTex);
+                impl.gl.ActiveTexture(kGlTexture1);
+                impl.gl.BindTexture(kGlTexture2D, impl.blurTex[0]);
+                impl.gl.ActiveTexture(kGlTexture0);
+                tex = impl.sceneSnapTex;
+
+                const GlassParams& gp = cmd.params;
+                impl.gl.Uniform4f(impl.glassLocRect, cmd.rectPx.x, cmd.rectPx.y, cmd.rectPx.w, cmd.rectPx.h);
+                impl.gl.Uniform4f(impl.glassLocTint, gp.tint.r / 255.0f, gp.tint.g / 255.0f, gp.tint.b / 255.0f, gp.tint.a / 255.0f);
+                impl.gl.Uniform4f(impl.glassLocBorderColor, gp.borderColor.r / 255.0f, gp.borderColor.g / 255.0f, gp.borderColor.b / 255.0f, gp.borderColor.a / 255.0f);
+                impl.gl.Uniform4f(impl.glassLocRimColor, gp.rimColor.r / 255.0f, gp.rimColor.g / 255.0f, gp.rimColor.b / 255.0f, gp.rimColor.a / 255.0f);
+                const keel::f32 bwPx = (gp.borderWidth > 0.0f && gp.borderColor.a > 0u) ? keel::max(1.0f, gp.borderWidth * cmd.effScale) : 0.0f;
+                impl.gl.Uniform4f(impl.glassLocA, cmd.radiusPx, bwPx, gp.refraction, gp.dispersion);
+                impl.gl.Uniform4f(impl.glassLocB, gp.rimLight, gp.saturation, gp.frost, cmd.effScale);
+
+                if (vao != impl.emptyVao) {
+                    impl.gl.BindVertexArray(impl.emptyVao);
+                    vao = impl.emptyVao;
+                }
+                impl.gl.DrawArrays(kGlTriangles, 0, 6);
+                impl.gl.ActiveTexture(kGlTexture1);
+                impl.gl.BindTexture(kGlTexture2D, 0u);
+                impl.gl.ActiveTexture(kGlTexture0);
+            }
         } state{*this, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight)};
 
         for (const DrawBatch& b : drawBatches) {
             if (b.count == 0u) continue;
+            if (b.kind == BatchKind::Glass) {
+                state.ReplayGlass(b);
+                MarkBackdropDirty(b.boundsPx);
+                continue;
+            }
             state.SetScissor(b.scissor);
             if (b.kind == BatchKind::Rects) {
                 state.ReplayRects(b);
@@ -1620,11 +2322,13 @@ struct GlEs3Canvas::Impl {
             } else {
                 state.ReplayTris(b);
             }
+            MarkBackdropDirty(b.boundsPx);
         }
         state.SetBlend(false, 0u);
 
         frameQuads.clear();
         frameTris.clear();
+        frameGlass.clear();
         drawBatches.clear();
         roundedClipTable.clear();
         roundedClipTable.push_back(RoundedClipSnapshot{});
@@ -1685,9 +2389,8 @@ struct GlEs3Canvas::Impl {
     void PushRect(const QuadInstance& q) {
         if (!initialized) return;
         const keel::f32 pad = (q.radius > 0.0f || q.strokeW > 0.0f) ? 2.0f : 0.0f;
-        const keel::u16 clipIdx = EffectiveRoundedClipIdx(
-            Rect(q.rx - pad, q.ry - pad, q.rw + pad * 2.0f, q.rh + pad * 2.0f)
-        );
+        const Rect qBounds(q.rx - pad, q.ry - pad, q.rw + pad * 2.0f, q.rh + pad * 2.0f);
+        const keel::u16 clipIdx = EffectiveRoundedClipIdx(qBounds);
         const keel::u32 qIdx = keel::as<keel::u32>(frameQuads.size());
         frameQuads.push_back(q);
 
@@ -1696,6 +2399,7 @@ struct GlEs3Canvas::Impl {
             if (last.kind == BatchKind::Rects &&
                 last.scissor == curScissor && last.roundedClipIdx == clipIdx) {
                 ++last.count;
+                last.boundsPx = UnionRect(last.boundsPx, qBounds);
                 return;
             }
         }
@@ -1708,7 +2412,8 @@ struct GlEs3Canvas::Impl {
             .isLcd = false,
             .lcdRgbKey = 0u,
             .scissor = curScissor,
-            .roundedClipIdx = clipIdx
+            .roundedClipIdx = clipIdx,
+            .boundsPx = qBounds
         });
     }
 
@@ -1720,10 +2425,13 @@ struct GlEs3Canvas::Impl {
         bool rotatedGlyph = false
     ) {
         if (!initialized) return;
+        const keel::f32 pad = (q.mode < 1.5f || q.mode > 5.5f) ? 2.0f : 0.0f;
+        const Rect qBounds = rotatedGlyph
+            ? Rect(0.0f, 0.0f, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight))
+            : Rect(q.rx - pad, q.ry - pad, q.rw + pad * 2.0f, q.rh + pad * 2.0f);
         keel::u16 clipIdx = curRoundedClipIdx;
         if (clipIdx != 0u && !rotatedGlyph) {
-            const keel::f32 pad = (q.mode < 1.5f || q.mode > 5.5f) ? 2.0f : 0.0f;
-            clipIdx = EffectiveRoundedClipIdx(Rect(q.rx - pad, q.ry - pad, q.rw + pad * 2.0f, q.rh + pad * 2.0f));
+            clipIdx = EffectiveRoundedClipIdx(qBounds);
         }
         const keel::u32 qIdx = keel::as<keel::u32>(frameQuads.size());
         frameQuads.push_back(q);
@@ -1738,6 +2446,7 @@ struct GlEs3Canvas::Impl {
                     last.tex = tex;
                 }
                 ++last.count;
+                last.boundsPx = UnionRect(last.boundsPx, qBounds);
                 return;
             }
         }
@@ -1750,12 +2459,19 @@ struct GlEs3Canvas::Impl {
             .isLcd = isLcd,
             .lcdRgbKey = lcdRgbKey,
             .scissor = curScissor,
-            .roundedClipIdx = clipIdx
+            .roundedClipIdx = clipIdx,
+            .boundsPx = qBounds
         });
     }
 
     void PushTri(Vec2 a, Vec2 b, Vec2 c, Color col) {
         if (!initialized || col.a == 0u) return;
+        const keel::f32 minX = keel::min(a.x, keel::min(b.x, c.x));
+        const keel::f32 minY = keel::min(a.y, keel::min(b.y, c.y));
+        const keel::f32 maxX = keel::max(a.x, keel::max(b.x, c.x));
+        const keel::f32 maxY = keel::max(a.y, keel::max(b.y, c.y));
+        const Rect triBounds(minX, minY, keel::max(1.0f, maxX - minX), keel::max(1.0f, maxY - minY));
+
         const keel::u32 firstIdx = keel::as<keel::u32>(frameTris.size());
         const keel::f32 r = col.r / 255.0f;
         const keel::f32 g = col.g / 255.0f;
@@ -1770,6 +2486,7 @@ struct GlEs3Canvas::Impl {
             if (last.kind == BatchKind::Tris &&
                 last.scissor == curScissor && last.roundedClipIdx == curRoundedClipIdx) {
                 last.count += 3u;
+                last.boundsPx = UnionRect(last.boundsPx, triBounds);
                 return;
             }
         }
@@ -1782,7 +2499,8 @@ struct GlEs3Canvas::Impl {
             .isLcd = false,
             .lcdRgbKey = 0u,
             .scissor = curScissor,
-            .roundedClipIdx = curRoundedClipIdx
+            .roundedClipIdx = curRoundedClipIdx,
+            .boundsPx = triBounds
         });
     }
 
@@ -2111,12 +2829,20 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->roundedClipStack.clear();
     m_impl->frameQuads.clear();
     m_impl->frameTris.clear();
+    m_impl->frameGlass.clear();
     m_impl->drawBatches.clear();
     m_impl->roundedClipTable.clear();
     m_impl->roundedClipTable.push_back(Impl::RoundedClipSnapshot{});
     m_impl->curScissor = Impl::ScissorState{};
     m_impl->curRoundedClipIdx = 0u;
     m_impl->activeGpuPassesThisFrame = 0u;
+    m_impl->usedGlassThisFrame = false;
+    m_impl->renderingToSceneFbo = false;
+    m_impl->blurValid = false;
+    m_impl->backdropDirtyAny = false;
+    m_impl->dirtyBackdropPx = Rect{};
+    m_impl->validBlurRectPx = Rect{};
+    m_impl->blurCapturesThisFrame = 0u;
     ++m_impl->frameCounter;
 
     if (!m_impl->initialized) return;
@@ -2124,12 +2850,17 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->BeginTimerQuery();
 
     auto& gl = m_impl->gl;
+    if (m_impl->usedGlassPrevFrame && m_impl->fboSupported && !m_impl->glassInitFailed) {
+        (void)m_impl->EnsureSceneFboActive(/*blitExistingFromDefault=*/false);
+    } else if (m_impl->fboSupported && gl.BindFramebuffer) {
+        gl.BindFramebuffer(kGlFramebuffer, 0u);
+    }
     gl.Viewport(0, 0, keel::as<GLsizei>(width), keel::as<GLsizei>(height));
     gl.Disable(kGlDepthTest);
     gl.Disable(kGlStencilTest);
     gl.Disable(kGlCullFace);
     gl.Disable(kGlScissorTest);
-    if (m_impl->isDesktopGl && m_impl->msaaSamples > 1) {
+    if (m_impl->isDesktopGl && m_impl->msaaSamples > 1 && !m_impl->renderingToSceneFbo) {
         gl.Enable(kGlMultisample);
     }
     gl.Enable(kGlBlend);
@@ -2140,6 +2871,8 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
 void GlEs3Canvas::End() {
     if (!m_impl->initialized) return;
     m_impl->FlushAll();
+    m_impl->PresentSceneFboToDefault();
+    m_impl->usedGlassPrevFrame = m_impl->usedGlassThisFrame;
     m_impl->gl.Disable(kGlScissorTest);
     m_impl->EndTimerQuery();
 }
@@ -2186,12 +2919,13 @@ void GlEs3Canvas::Clear(Color color, keel::Optional<Rect> rect) {
         gl.Disable(kGlScissorTest);
         gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
         GLbitfield mask = kGlColorBufferBit;
-        if (m_impl->stencilBits > 0) {
+        if (m_impl->stencilBits > 0 || m_impl->renderingToSceneFbo) {
             if (gl.StencilMask) gl.StencilMask(0xFFu);
             if (gl.ClearStencil) gl.ClearStencil(0);
             mask |= kGlStencilBufferBit;
         }
         gl.Clear(mask);
+        m_impl->MarkBackdropDirtyFull();
         m_impl->ApplyClip();
     } else {
         const Rect pr = m_impl->PxRect(*rect);
@@ -2206,6 +2940,7 @@ void GlEs3Canvas::Clear(Color color, keel::Optional<Rect> rect) {
         gl.Scissor(x0, keel::max(0, glY), w, h);
         gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
         gl.Clear(kGlColorBufferBit);
+        m_impl->MarkBackdropDirty(pr);
         m_impl->ApplyClip();
     }
 }
@@ -2315,6 +3050,46 @@ void GlEs3Canvas::DrawShadow(
         0.0f, 0.0f, 0.0f, 0.0f,
         rPx, sigma, kModeShadow, 0.0f
     }, 0u);
+}
+
+bool GlEs3Canvas::SupportsBackdropBlur() const noexcept {
+    return m_impl && m_impl->initialized && m_impl->fboSupported && !m_impl->glassInitFailed;
+}
+
+void GlEs3Canvas::DrawGlassRect(Rect rect, keel::f32 radius, const GlassParams& params) {
+    if (rect.w <= 0.0f || rect.h <= 0.0f) return;
+    if (!SupportsBackdropBlur()) {
+        ICanvas::DrawGlassRect(rect, radius, params);
+        return;
+    }
+
+    const keel::f32 eff = m_impl->EffScale();
+    const Rect pr = m_impl->PxRect(rect);
+    if (m_impl->IsClippedOut(pr, 2.0f)) return;
+
+    const keel::f32 rPx = keel::clamp(radius * eff, 0.0f, keel::min(pr.w, pr.h) * 0.5f);
+    const keel::u16 clipIdx = m_impl->EffectiveRoundedClipIdx(
+        Rect(pr.x - 2.0f, pr.y - 2.0f, pr.w + 4.0f, pr.h + 4.0f)
+    );
+    const keel::u32 gIdx = keel::as<keel::u32>(m_impl->frameGlass.size());
+    m_impl->frameGlass.push_back(Impl::GlassDrawCmd{
+        .rectPx = pr,
+        .radiusPx = rPx,
+        .params = params,
+        .effScale = eff
+    });
+    m_impl->drawBatches.push_back(Impl::DrawBatch{
+        .kind = Impl::BatchKind::Glass,
+        .first = gIdx,
+        .count = 1u,
+        .tex = 0u,
+        .isLcd = false,
+        .lcdRgbKey = 0u,
+        .scissor = m_impl->curScissor,
+        .roundedClipIdx = clipIdx,
+        .boundsPx = pr
+    });
+    m_impl->usedGlassThisFrame = true;
 }
 
 Vec2 GlEs3Canvas::MeasureText(keel::StringRef text, keel::f32 fontSize) {
@@ -3206,6 +3981,7 @@ bool GlEs3Canvas::DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool /*punchH
     gl.ActiveTexture(kGlTexture0);
     gl.BindTexture(kGlTexture2D, 0);
     m_impl->ApplyClip();
+    m_impl->MarkBackdropDirty(clipPx);
 
     ++m_impl->activeGpuPassesThisFrame;
     return true;
@@ -3224,8 +4000,15 @@ void GlEs3Canvas::TrimCaches() noexcept {
     if (m_impl->frameTris.empty() && m_impl->frameTris.capacity() > 8192u) {
         m_impl->frameTris = {};
     }
+    if (m_impl->frameGlass.empty() && m_impl->frameGlass.capacity() > 256u) {
+        m_impl->frameGlass = {};
+    }
     if (m_impl->drawBatches.empty() && m_impl->drawBatches.capacity() > 512u) {
         m_impl->drawBatches = {};
+    }
+    if (m_impl->initialized && !m_impl->usedGlassPrevFrame && !m_impl->usedGlassThisFrame &&
+        m_impl->sceneFbo != 0u) {
+        m_impl->ReleaseGlassFbos();
     }
 
     // Evict GPU shader textures for widgets that are no longer active on screen

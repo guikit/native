@@ -37,10 +37,15 @@ int main() {
         GlEs3Canvas uninitCanvas(nullptr, false);
         CHECK(!uninitCanvas.IsInitialized());
         CHECK(!uninitCanvas.UsesCpuFramebuffer());
+        CHECK(!uninitCanvas.SupportsBackdropBlur());
         uninitCanvas.Begin(640, 480, 1.0f);
         uninitCanvas.Clear(Color(10, 14, 20));
         uninitCanvas.DrawRect(Rect(0, 0, 100, 50), Color(255, 0, 0));
         uninitCanvas.DrawRoundRect(Rect(10, 10, 80, 30), 6.0f, Color(0, 128, 255), Color(255, 255, 255), 1.0f);
+        uninitCanvas.DrawGlassRect(Rect(20, 20, 120, 60), 10.0f, GlassParams{
+            .tint = Color(30, 41, 59, 120),
+            .borderColor = Color(255, 255, 255, 80)
+        });
         uninitCanvas.DrawLine({0, 0}, {50, 50}, Color(255, 255, 255), 2.0f);
         uninitCanvas.End();
     }
@@ -113,6 +118,7 @@ int main() {
             const Vec2 tm = glCanvas.MeasureText("Hello ES3", 16.0f);
             CHECK(tm.x > 20.0f && tm.y > 10.0f);
             CHECK(glCanvas.SupportsGpuShaders());
+            CHECK(glCanvas.SupportsBackdropBlur());
 
             const Vec2 iconSize = glCanvas.GetImageSize("assets/guikit-icon-inter850-1024.png");
             CHECK(keel::abs(iconSize.x - 1024.0f) < 0.5f && keel::abs(iconSize.y - 1024.0f) < 0.5f);
@@ -233,8 +239,60 @@ void main() {
 
                 CHECK(glCanvas.DrawImage("assets/guikit-icon-inter850-1024.png", Rect(20.0f, 100.0f, 48.0f, 48.0f), 8.0f, 255));
                 CHECK(glCanvas.DrawPixels({samplePixels, 16u, 16u}, Rect(100.0f, 100.0f, 48.0f, 48.0f), 6.0f, 255));
+
+                // Exercise GPU Dual-Kawase backdrop blur + refractive Glass SDF shader (first frame blit + second frame FBO fast path)
+                glCanvas.DrawGlassRect(Rect(40.0f, 36.0f, 160.0f, 96.0f), 14.0f, GlassParams{
+                    .tint = Color(24, 34, 52, 118),
+                    .blurRadius = 14.0f,
+                    .refraction = 0.36f,
+                    .dispersion = 0.22f,
+                    .rimLight = 0.48f,
+                    .saturation = 1.22f,
+                    .frost = 0.72f,
+                    .borderWidth = 1.0f,
+                    .borderColor = Color(255, 255, 255, 72),
+                    .rimColor = Color(255, 255, 255, 255)
+                });
+                // Second stacked glass overlay (glass-on-glass dirty-rect recapture)
+                glCanvas.DrawGlassRect(Rect(110.0f, 70.0f, 120.0f, 68.0f), 12.0f, GlassParams{
+                    .tint = Color(30, 41, 59, 176),
+                    .blurRadius = 18.0f,
+                    .refraction = 0.26f,
+                    .dispersion = 0.14f,
+                    .rimLight = 0.42f,
+                    .saturation = 1.16f,
+                    .frost = 0.86f,
+                    .borderWidth = 1.0f,
+                    .borderColor = Color(255, 255, 255, 86),
+                    .rimColor = Color(255, 255, 255, 255)
+                });
+                CHECK(glCanvas.SupportsBackdropBlur());
                 glCanvas.End();
                 nativeWin->SwapBuffers();
+            }
+            // Verify full ChromeStyle::Glass immediate-mode UI frame + clean FBO eviction after switching back to non-glass frame
+            {
+                const UiTheme glassUiTheme = UiTheme::Build({.base = ThemePreset::Nord, .chrome = ChromeStyle::Glass});
+                ui.SetTheme(glassUiTheme);
+                keel::f32 sliderVal = 55.0f;
+                ui.BeginFrame({400.0f, 300.0f}, 1.0f);
+                if (auto card = guikit::Card(ui, {.gap = 8.0f, .padding = Padding::All(14.0f), .surface = SurfaceRole::Raised})) {
+                    guikit::Heading(ui, {.label = "Glass Chrome Smoke"});
+                    (void)guikit::Button(ui, {.text = "Refract", .variant = UiVariant::Primary});
+                    (void)guikit::Slider(ui, sliderVal, 0.0f, 100.0f);
+                }
+                ui.EndFrame(glCanvas);
+                nativeWin->SwapBuffers();
+
+                // Non-glass frame + TrimCaches should succeed cleanly without errors
+                ui.SetTheme(UiTheme::Dark());
+                ui.BeginFrame({400.0f, 300.0f}, 1.0f);
+                if (auto col = guikit::Column(ui, {.padding = Padding::All(12.0f)})) {
+                    guikit::Heading(ui, {.label = "Non-Glass Fast Path"});
+                }
+                ui.EndFrame(glCanvas);
+                nativeWin->SwapBuffers();
+                CHECK(glCanvas.SupportsBackdropBlur());
             }
             glCanvas.TrimCaches();
             nativeWin->Destroy();

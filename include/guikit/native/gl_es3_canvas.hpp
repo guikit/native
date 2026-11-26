@@ -80,6 +80,8 @@ public:
         Color color = Color(0, 0, 0, 96),
         keel::f32 spread = 0.0f
     ) override;
+    [[nodiscard]] bool SupportsBackdropBlur() const noexcept override;
+    void DrawGlassRect(Rect rect, keel::f32 radius, const GlassParams& params) override;
 
     Vec2 MeasureText(keel::StringRef text, keel::f32 fontSize) override;
     Vec2 MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, FontStyle style) override;

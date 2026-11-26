@@ -65,6 +65,13 @@ static constexpr GLenum kGlConstantColor = 0x8001u;
 static constexpr GLenum kGlFuncAdd = 0x8006u;
 
 static constexpr GLenum kGlFramebuffer = 0x8D40u;
+static constexpr GLenum kGlReadFramebuffer = 0x8CA8u;
+static constexpr GLenum kGlDrawFramebuffer = 0x8CA9u;
+static constexpr GLenum kGlRenderbuffer = 0x8D41u;
+static constexpr GLenum kGlColorAttachment0 = 0x8CE0u;
+static constexpr GLenum kGlStencilAttachment = 0x8D20u;
+static constexpr GLenum kGlStencilIndex8 = 0x8D48u;
+static constexpr GLenum kGlFramebufferComplete = 0x8CD5u;
 static constexpr GLenum kGlStencil = 0x1802u;
 static constexpr GLenum kGlFramebufferAttachmentStencilSize = 0x8217u;
 static constexpr GLenum kGlStencilBits = 0x0D57u;
@@ -185,6 +192,18 @@ struct GlEs3Api {
     using PfnGetQueryObjectiv = void(GUIKIT_GL_APIENTRY*)(GLuint id, GLenum pname, GLint* params);
     using PfnGetQueryObjectui64v = void(GUIKIT_GL_APIENTRY*)(GLuint id, GLenum pname, GLuint64* params);
 
+    using PfnGenFramebuffers = void(GUIKIT_GL_APIENTRY*)(GLsizei n, GLuint* framebuffers);
+    using PfnDeleteFramebuffers = void(GUIKIT_GL_APIENTRY*)(GLsizei n, const GLuint* framebuffers);
+    using PfnBindFramebuffer = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLuint framebuffer);
+    using PfnFramebufferTexture2D = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+    using PfnCheckFramebufferStatus = GLenum(GUIKIT_GL_APIENTRY*)(GLenum target);
+    using PfnBlitFramebuffer = void(GUIKIT_GL_APIENTRY*)(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+    using PfnGenRenderbuffers = void(GUIKIT_GL_APIENTRY*)(GLsizei n, GLuint* renderbuffers);
+    using PfnDeleteRenderbuffers = void(GUIKIT_GL_APIENTRY*)(GLsizei n, const GLuint* renderbuffers);
+    using PfnBindRenderbuffer = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLuint renderbuffer);
+    using PfnRenderbufferStorage = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+    using PfnFramebufferRenderbuffer = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+
     PfnGetString GetString{nullptr};
     PfnGetError GetError{nullptr};
     PfnGetIntegerv GetIntegerv{nullptr};
@@ -260,6 +279,25 @@ struct GlEs3Api {
     PfnEndQuery EndQuery{nullptr};
     PfnGetQueryObjectiv GetQueryObjectiv{nullptr};
     PfnGetQueryObjectui64v GetQueryObjectui64v{nullptr};
+
+    PfnGenFramebuffers GenFramebuffers{nullptr};
+    PfnDeleteFramebuffers DeleteFramebuffers{nullptr};
+    PfnBindFramebuffer BindFramebuffer{nullptr};
+    PfnFramebufferTexture2D FramebufferTexture2D{nullptr};
+    PfnCheckFramebufferStatus CheckFramebufferStatus{nullptr};
+    PfnBlitFramebuffer BlitFramebuffer{nullptr};
+    PfnGenRenderbuffers GenRenderbuffers{nullptr};
+    PfnDeleteRenderbuffers DeleteRenderbuffers{nullptr};
+    PfnBindRenderbuffer BindRenderbuffer{nullptr};
+    PfnRenderbufferStorage RenderbufferStorage{nullptr};
+    PfnFramebufferRenderbuffer FramebufferRenderbuffer{nullptr};
+
+    [[nodiscard]] bool HasFramebufferOps() const noexcept {
+        return GenFramebuffers && DeleteFramebuffers && BindFramebuffer &&
+               FramebufferTexture2D && CheckFramebufferStatus && BlitFramebuffer &&
+               GenRenderbuffers && DeleteRenderbuffers && BindRenderbuffer &&
+               RenderbufferStorage && FramebufferRenderbuffer;
+    }
 
     template <typename Fn>
     bool LoadFn(GlProcAddressFn procLoader, const char* name, Fn& out) noexcept {
@@ -355,6 +393,18 @@ struct GlEs3Api {
         TexImage2D = ::glTexImage2D;
         TexSubImage2D = ::glTexSubImage2D;
         DeleteTextures = ::glDeleteTextures;
+
+        GenFramebuffers = ::glGenFramebuffers;
+        DeleteFramebuffers = ::glDeleteFramebuffers;
+        BindFramebuffer = ::glBindFramebuffer;
+        FramebufferTexture2D = ::glFramebufferTexture2D;
+        CheckFramebufferStatus = ::glCheckFramebufferStatus;
+        BlitFramebuffer = ::glBlitFramebuffer;
+        GenRenderbuffers = ::glGenRenderbuffers;
+        DeleteRenderbuffers = ::glDeleteRenderbuffers;
+        BindRenderbuffer = ::glBindRenderbuffer;
+        RenderbufferStorage = ::glRenderbufferStorage;
+        FramebufferRenderbuffer = ::glFramebufferRenderbuffer;
         return true;
 #else
 #if defined(_WIN32)
@@ -445,6 +495,19 @@ struct GlEs3Api {
         (void)LoadFn(procLoader, "glEndQuery", EndQuery);
         (void)LoadFn(procLoader, "glGetQueryObjectiv", GetQueryObjectiv);
         (void)LoadFn(procLoader, "glGetQueryObjectui64v", GetQueryObjectui64v);
+
+        // Standard OpenGL 3.3 Core / ES 3.0 framebuffer & renderbuffer ops (for GPU backdrop blur / Glass)
+        (void)LoadFn(procLoader, "glGenFramebuffers", GenFramebuffers);
+        (void)LoadFn(procLoader, "glDeleteFramebuffers", DeleteFramebuffers);
+        (void)LoadFn(procLoader, "glBindFramebuffer", BindFramebuffer);
+        (void)LoadFn(procLoader, "glFramebufferTexture2D", FramebufferTexture2D);
+        (void)LoadFn(procLoader, "glCheckFramebufferStatus", CheckFramebufferStatus);
+        (void)LoadFn(procLoader, "glBlitFramebuffer", BlitFramebuffer);
+        (void)LoadFn(procLoader, "glGenRenderbuffers", GenRenderbuffers);
+        (void)LoadFn(procLoader, "glDeleteRenderbuffers", DeleteRenderbuffers);
+        (void)LoadFn(procLoader, "glBindRenderbuffer", BindRenderbuffer);
+        (void)LoadFn(procLoader, "glRenderbufferStorage", RenderbufferStorage);
+        (void)LoadFn(procLoader, "glFramebufferRenderbuffer", FramebufferRenderbuffer);
         return ok;
 #endif
     }
