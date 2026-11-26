@@ -544,7 +544,7 @@ bool EmscriptenPlatformWindow::Create(
         attrs.alpha = EM_FALSE;
         attrs.depth = EM_FALSE;
         attrs.stencil = EM_TRUE;
-        attrs.antialias = EM_TRUE;
+        attrs.antialias = EM_FALSE;
         attrs.premultipliedAlpha = EM_FALSE;
         attrs.preserveDrawingBuffer = EM_FALSE;
         attrs.powerPreference = EM_WEBGL_POWER_PREFERENCE_HIGH_PERFORMANCE;

@@ -716,9 +716,7 @@ struct Win32PlatformWindow::Impl {
                 keel::i32 samples;
             };
             static constexpr PfProfile kProfiles[] = {
-                {8, 1, 4}, // 4x MSAA + 8-bit stencil
-                {8, 1, 2}, // 2x MSAA + 8-bit stencil
-                {8, 0, 0}, // 8-bit stencil without MSAA
+                {8, 0, 0}, // 8-bit stencil, 0 MSAA (all UI primitives use analytical SDF AA; avoids 4x fill-rate overhead)
                 {0, 0, 0}  // Minimal RGBA8 fallback
             };
             for (const PfProfile& prof : kProfiles) {

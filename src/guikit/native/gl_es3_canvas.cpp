@@ -53,6 +53,125 @@ static constexpr keel::f32 kModeShadow      = 7.0f;
 static constexpr keel::u32 kAtlasSize    = 2048u;
 static constexpr keel::u32 kLcdAtlasSize = 1024u;
 
+static constexpr const char* kRectVertBody = R"GLSL(
+layout(location = 0) in vec4 a_Rect;
+layout(location = 2) in vec4 a_Fill;
+layout(location = 3) in vec4 a_Stroke;
+layout(location = 4) in vec4 a_Params;
+
+uniform vec2 u_Viewport;
+
+out vec2 v_LocalPx;
+out vec2 v_HalfSize;
+out vec2 v_ScreenPx;
+out vec4 v_Fill;
+out vec4 v_Stroke;
+out vec2 v_RectParams;
+
+void main() {
+    vec2 corner;
+    if (gl_VertexID == 0)      corner = vec2(0.0, 0.0);
+    else if (gl_VertexID == 1) corner = vec2(1.0, 0.0);
+    else if (gl_VertexID == 2) corner = vec2(1.0, 1.0);
+    else if (gl_VertexID == 3) corner = vec2(0.0, 0.0);
+    else if (gl_VertexID == 4) corner = vec2(1.0, 1.0);
+    else                       corner = vec2(0.0, 1.0);
+
+    float pad = (a_Params.x > 0.0 || a_Params.y > 0.0) ? 1.5 : 0.0;
+    vec2 rectMin = a_Rect.xy - vec2(pad);
+    vec2 rectSize = a_Rect.zw + vec2(pad * 2.0);
+    vec2 posPx = rectMin + corner * rectSize;
+
+    vec2 center = a_Rect.xy + a_Rect.zw * 0.5;
+    v_HalfSize = a_Rect.zw * 0.5;
+    v_LocalPx = posPx - center;
+    v_ScreenPx = posPx;
+    v_Fill = a_Fill;
+    v_Stroke = a_Stroke;
+    v_RectParams = a_Params.xy;
+
+    vec2 ndc = (posPx / max(u_Viewport, vec2(1.0))) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+)GLSL";
+
+static constexpr const char* kRectFragBody = R"GLSL(
+in vec2 v_LocalPx;
+in vec2 v_HalfSize;
+in vec2 v_ScreenPx;
+in vec4 v_Fill;
+in vec4 v_Stroke;
+in vec2 v_RectParams;
+
+uniform int u_ClipCount;
+uniform vec4 u_ClipRects[4];
+uniform vec4 u_ClipRadii;
+
+out vec4 FragColor;
+
+float sdRoundedBox(vec2 p, vec2 b, float r) {
+    float rr = min(r, min(b.x, b.y));
+    vec2 q = abs(p) - b + vec2(rr);
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;
+}
+
+float clipRadiusAt(int idx) {
+    if (idx == 0) return u_ClipRadii.x;
+    if (idx == 1) return u_ClipRadii.y;
+    if (idx == 2) return u_ClipRadii.z;
+    return u_ClipRadii.w;
+}
+
+float computeRoundedClipCov() {
+    float cov = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= u_ClipCount) break;
+        float d = sdRoundedBox(v_ScreenPx - u_ClipRects[i].xy, u_ClipRects[i].zw, clipRadiusAt(i));
+        cov = min(cov, 1.0 - smoothstep(-0.65, 0.65, d));
+    }
+    return cov;
+}
+
+void main() {
+    float clipCov = 1.0;
+    if (u_ClipCount > 0) {
+        clipCov = computeRoundedClipCov();
+        if (clipCov <= 0.001) discard;
+    }
+
+    float radius = v_RectParams.x;
+    float strokeW = v_RectParams.y;
+    if (radius <= 0.0 && strokeW <= 0.0) {
+        FragColor = vec4(v_Fill.rgb, v_Fill.a * clipCov);
+        return;
+    }
+
+    float d = sdRoundedBox(v_LocalPx, v_HalfSize, radius);
+    float aa = 0.65;
+    float outerCov = 1.0 - smoothstep(-aa, aa, d);
+    if (outerCov <= 0.001) discard;
+
+    if (strokeW > 0.0 && v_Stroke.a > 0.0) {
+        float innerD = d + strokeW;
+        float fillCov = 1.0 - smoothstep(-aa, aa, innerD);
+        float borderCov = clamp(outerCov - fillCov, 0.0, 1.0);
+
+        vec4 fillLayer = vec4(v_Fill.rgb * v_Fill.a, v_Fill.a) * fillCov;
+        vec4 borderLayer = vec4(v_Stroke.rgb * v_Stroke.a, v_Stroke.a) * borderCov;
+        vec4 combined = borderLayer + fillLayer * (1.0 - borderLayer.a);
+        float finalA = combined.a * clipCov;
+        if (finalA <= 0.001) discard;
+        FragColor = vec4(combined.rgb / combined.a, finalA);
+        return;
+    }
+
+    float alpha = v_Fill.a * outerCov * clipCov;
+    if (alpha <= 0.001) discard;
+    FragColor = vec4(v_Fill.rgb, alpha);
+}
+)GLSL";
+
 static constexpr const char* kQuadVertBody = R"GLSL(
 layout(location = 0) in vec4 a_Rect;
 layout(location = 1) in vec4 a_Uv;
@@ -177,6 +296,10 @@ float roundedBoxShadow(vec2 p, vec2 halfSize, float sigma, float corner) {
         float d = sdRoundedBox(p, halfSize, r);
         return 1.0 - smoothstep(-0.65, 0.65, d);
     }
+    vec2 inner = halfSize - vec2(r + 3.0 * sigma);
+    if (abs(p.x) < inner.x && abs(p.y) < inner.y) {
+        return 1.0;
+    }
     float low = p.y - halfSize.y;
     float high = p.y + halfSize.y;
     float start = clamp(-3.0 * sigma, low, high);
@@ -202,32 +325,6 @@ void main() {
     float radius = v_Params.x;
     float strokeW = v_Params.y;
     float mode = v_Params.z;
-
-    if (mode < 0.5) {
-        // Mode 0: Solid / Rounded Rectangle + optional inner stroke
-        float d = sdRoundedBox(v_LocalPx, v_HalfSize, radius);
-        float aa = 0.65;
-        float outerCov = 1.0 - smoothstep(-aa, aa, d);
-        if (outerCov <= 0.001) discard;
-
-        vec4 outCol = vec4(v_Fill.rgb, v_Fill.a * outerCov * clipCov);
-        if (strokeW > 0.0 && v_Stroke.a > 0.0) {
-            float innerD = d + strokeW;
-            float fillCov = 1.0 - smoothstep(-aa, aa, innerD);
-            float borderCov = clamp(outerCov - fillCov, 0.0, 1.0);
-
-            vec4 fillLayer = vec4(v_Fill.rgb * v_Fill.a, v_Fill.a) * fillCov;
-            vec4 borderLayer = vec4(v_Stroke.rgb * v_Stroke.a, v_Stroke.a) * borderCov;
-            vec4 combined = borderLayer + fillLayer * (1.0 - borderLayer.a);
-            float finalA = combined.a * clipCov;
-            if (finalA <= 0.001) discard;
-            FragColor = vec4(combined.rgb / combined.a, finalA);
-            return;
-        }
-        if (outCol.a <= 0.001) discard;
-        FragColor = outCol;
-        return;
-    }
 
     if (mode < 1.5) {
         // Mode 1: Anti-aliased line capsule
@@ -695,6 +792,12 @@ struct GlEs3Canvas::Impl {
         return stencilBits > 0 && gl.ColorMask && gl.StencilFunc && gl.StencilOp && gl.StencilMask;
     }
 
+    GLuint rectProg{0};
+    GLint rectUniformViewport{-1};
+    GLint rectUniformClipCount{-1};
+    GLint rectUniformClipRects{-1};
+    GLint rectUniformClipRadii{-1};
+
     GLuint quadProg{0};
     GLint quadUniformViewport{-1};
     GLint quadUniformTex{-1};
@@ -796,7 +899,7 @@ struct GlEs3Canvas::Impl {
         }
     };
 
-    enum class BatchKind : keel::u8 { Quads = 0, Tris = 1 };
+    enum class BatchKind : keel::u8 { Rects = 0, Quads = 1, Tris = 2 };
 
     struct DrawBatch {
         BatchKind kind{BatchKind::Quads};
@@ -895,12 +998,21 @@ struct GlEs3Canvas::Impl {
             glRenderer = keel::String::from(reinterpret_cast<const char*>(ren));
         }
 
+        rectProg = LinkProgram(gl, isDesktopGl, kRectVertBody, kRectFragBody);
         quadProg = LinkProgram(gl, isDesktopGl, kQuadVertBody, kQuadFragBody);
         triProg = LinkProgram(gl, isDesktopGl, kTriVertBody, kTriFragBody);
-        if (quadProg == 0u || triProg == 0u) {
+        if (rectProg == 0u || quadProg == 0u || triProg == 0u) {
             Shutdown();
             return false;
         }
+
+        rectUniformViewport = gl.GetUniformLocation(rectProg, "u_Viewport");
+        rectUniformClipCount = gl.GetUniformLocation(rectProg, "u_ClipCount");
+        rectUniformClipRects = gl.GetUniformLocation(rectProg, "u_ClipRects[0]");
+        if (rectUniformClipRects < 0) {
+            rectUniformClipRects = gl.GetUniformLocation(rectProg, "u_ClipRects");
+        }
+        rectUniformClipRadii = gl.GetUniformLocation(rectProg, "u_ClipRadii");
 
         quadUniformViewport = gl.GetUniformLocation(quadProg, "u_Viewport");
         quadUniformTex = gl.GetUniformLocation(quadProg, "u_Tex");
@@ -1085,7 +1197,7 @@ struct GlEs3Canvas::Impl {
     }
 
     void Shutdown() noexcept {
-        if (!initialized && quadProg == 0u && triProg == 0u) {
+        if (!initialized && rectProg == 0u && quadProg == 0u && triProg == 0u) {
             return;
         }
         ReleaseGpuPassCaches();
@@ -1113,11 +1225,12 @@ struct GlEs3Canvas::Impl {
         if (quadVao != 0u && gl.DeleteVertexArrays) gl.DeleteVertexArrays(1, &quadVao);
         if (triVbo != 0u && gl.DeleteBuffers) gl.DeleteBuffers(1, &triVbo);
         if (triVao != 0u && gl.DeleteVertexArrays) gl.DeleteVertexArrays(1, &triVao);
+        if (rectProg != 0u && gl.DeleteProgram) gl.DeleteProgram(rectProg);
         if (quadProg != 0u && gl.DeleteProgram) gl.DeleteProgram(quadProg);
         if (triProg != 0u && gl.DeleteProgram) gl.DeleteProgram(triProg);
         transientPixelsTex = atlasLcdTex = atlasTex = whiteTex = 0u;
         passQuadVbo = passQuadVao = quadInstanceVbo = quadVao = triVbo = triVao = 0u;
-        quadProg = triProg = 0u;
+        rectProg = quadProg = triProg = 0u;
         initialized = false;
     }
 
@@ -1374,9 +1487,27 @@ struct GlEs3Canvas::Impl {
             keel::u32 lcdRgb{0u};
             bool scissorKnown{false};
             ScissorState scissor{};
+            keel::u16 rectClipIdx{0xFFFFu};
             keel::u16 quadClipIdx{0xFFFFu};
             keel::u16 triClipIdx{0xFFFFu};
             keel::usize quadBaseBytes{keel::Limits<keel::usize>::kMax};
+
+            void BindQuadAttribs(keel::u32 firstQuad) noexcept {
+                if (vao != impl.quadVao) {
+                    impl.gl.BindVertexArray(impl.quadVao);
+                    impl.gl.BindBuffer(kGlArrayBuffer, impl.quadInstanceVbo);
+                    vao = impl.quadVao;
+                }
+                const keel::usize baseBytes = keel::as<keel::usize>(firstQuad) * sizeof(QuadInstance);
+                if (baseBytes != quadBaseBytes) {
+                    const GLsizei stride = keel::as<GLsizei>(sizeof(QuadInstance));
+                    for (GLuint loc = 0u; loc < 5u; ++loc) {
+                        const keel::usize off = baseBytes + keel::as<keel::usize>(loc) * 4u * sizeof(keel::f32);
+                        impl.gl.VertexAttribPointer(loc, 4, kGlFloat, kGlFalse, stride, reinterpret_cast<const void*>(off));
+                    }
+                    quadBaseBytes = baseBytes;
+                }
+            }
 
             void SetScissor(const ScissorState& want) noexcept {
                 if (scissorKnown && want == scissor) return;
@@ -1405,6 +1536,27 @@ struct GlEs3Canvas::Impl {
                 lcdRgb = wantRgb;
             }
 
+            void ReplayRects(const DrawBatch& b) noexcept {
+                SetBlend(false, 0u);
+                if (prog != impl.rectProg) {
+                    impl.gl.UseProgram(impl.rectProg);
+                    impl.gl.Uniform2f(impl.rectUniformViewport, vpW, vpH);
+                    prog = impl.rectProg;
+                }
+                if (b.roundedClipIdx != rectClipIdx) {
+                    const keel::usize idx = (b.roundedClipIdx < impl.roundedClipTable.size()) ? b.roundedClipIdx : 0u;
+                    impl.UploadRoundedClipSnapshot(
+                        impl.roundedClipTable[idx],
+                        impl.rectUniformClipCount,
+                        impl.rectUniformClipRects,
+                        impl.rectUniformClipRadii
+                    );
+                    rectClipIdx = b.roundedClipIdx;
+                }
+                BindQuadAttribs(b.first);
+                impl.gl.DrawArraysInstanced(kGlTriangles, 0, 6, keel::as<GLsizei>(b.count));
+            }
+
             void ReplayQuads(const DrawBatch& b) noexcept {
                 if (prog != impl.quadProg) {
                     impl.gl.UseProgram(impl.quadProg);
@@ -1422,11 +1574,6 @@ struct GlEs3Canvas::Impl {
                     );
                     quadClipIdx = b.roundedClipIdx;
                 }
-                if (vao != impl.quadVao) {
-                    impl.gl.BindVertexArray(impl.quadVao);
-                    impl.gl.BindBuffer(kGlArrayBuffer, impl.quadInstanceVbo);
-                    vao = impl.quadVao;
-                }
                 const GLuint wantTex = b.tex ? b.tex : impl.whiteTex;
                 if (tex != wantTex) {
                     impl.gl.ActiveTexture(kGlTexture0);
@@ -1434,16 +1581,7 @@ struct GlEs3Canvas::Impl {
                     tex = wantTex;
                 }
                 SetBlend(b.isLcd, b.lcdRgbKey);
-
-                const keel::usize baseBytes = keel::as<keel::usize>(b.first) * sizeof(QuadInstance);
-                if (baseBytes != quadBaseBytes) {
-                    const GLsizei stride = keel::as<GLsizei>(sizeof(QuadInstance));
-                    for (GLuint loc = 0u; loc < 5u; ++loc) {
-                        const keel::usize off = baseBytes + keel::as<keel::usize>(loc) * 4u * sizeof(keel::f32);
-                        impl.gl.VertexAttribPointer(loc, 4, kGlFloat, kGlFalse, stride, reinterpret_cast<const void*>(off));
-                    }
-                    quadBaseBytes = baseBytes;
-                }
+                BindQuadAttribs(b.first);
                 impl.gl.DrawArraysInstanced(kGlTriangles, 0, 6, keel::as<GLsizei>(b.count));
             }
 
@@ -1475,7 +1613,9 @@ struct GlEs3Canvas::Impl {
         for (const DrawBatch& b : drawBatches) {
             if (b.count == 0u) continue;
             state.SetScissor(b.scissor);
-            if (b.kind == BatchKind::Quads) {
+            if (b.kind == BatchKind::Rects) {
+                state.ReplayRects(b);
+            } else if (b.kind == BatchKind::Quads) {
                 state.ReplayQuads(b);
             } else {
                 state.ReplayTris(b);
@@ -1510,13 +1650,81 @@ struct GlEs3Canvas::Impl {
         gl.Scissor(st.x, st.y, st.w, st.h);
     }
 
+    [[nodiscard]] bool IsClippedOut(Rect pxRect, keel::f32 pad = 0.0f) const noexcept {
+        if (clipStack.empty()) return false;
+        const Rect& c = clipStack.back();
+        return (pxRect.Right() + pad <= c.x) || (pxRect.x - pad >= c.Right()) ||
+               (pxRect.Bottom() + pad <= c.y) || (pxRect.y - pad >= c.Bottom());
+    }
+
+    [[nodiscard]] keel::u16 EffectiveRoundedClipIdx(Rect pxBounds) const noexcept {
+        if (curRoundedClipIdx == 0u || roundedClipStack.empty()) {
+            return 0u;
+        }
+        const keel::usize total = roundedClipStack.size();
+        const keel::usize start = (total > 4u) ? (total - 4u) : 0u;
+        for (keel::usize i = start; i < total; ++i) {
+            const RoundedClipEntry& e = roundedClipStack[i];
+            const bool insideEdges =
+                (pxBounds.x >= e.rect.x + 2.0f) && (pxBounds.Right() <= e.rect.Right() - 2.0f) &&
+                (pxBounds.y >= e.rect.y + 2.0f) && (pxBounds.Bottom() <= e.rect.Bottom() - 2.0f);
+            if (!insideEdges) {
+                return curRoundedClipIdx;
+            }
+            const keel::f32 m = e.radius + 2.0f;
+            const bool avoidsCorners =
+                ((pxBounds.x >= e.rect.x + m) && (pxBounds.Right() <= e.rect.Right() - m)) ||
+                ((pxBounds.y >= e.rect.y + m) && (pxBounds.Bottom() <= e.rect.Bottom() - m));
+            if (!avoidsCorners) {
+                return curRoundedClipIdx;
+            }
+        }
+        return 0u;
+    }
+
+    void PushRect(const QuadInstance& q) {
+        if (!initialized) return;
+        const keel::f32 pad = (q.radius > 0.0f || q.strokeW > 0.0f) ? 2.0f : 0.0f;
+        const keel::u16 clipIdx = EffectiveRoundedClipIdx(
+            Rect(q.rx - pad, q.ry - pad, q.rw + pad * 2.0f, q.rh + pad * 2.0f)
+        );
+        const keel::u32 qIdx = keel::as<keel::u32>(frameQuads.size());
+        frameQuads.push_back(q);
+
+        if (!drawBatches.empty()) {
+            DrawBatch& last = drawBatches.back();
+            if (last.kind == BatchKind::Rects &&
+                last.scissor == curScissor && last.roundedClipIdx == clipIdx) {
+                ++last.count;
+                return;
+            }
+        }
+
+        drawBatches.push_back(DrawBatch{
+            .kind = BatchKind::Rects,
+            .first = qIdx,
+            .count = 1u,
+            .tex = 0u,
+            .isLcd = false,
+            .lcdRgbKey = 0u,
+            .scissor = curScissor,
+            .roundedClipIdx = clipIdx
+        });
+    }
+
     void PushQuad(
         const QuadInstance& q,
         GLuint tex,
         bool isLcd = false,
-        keel::u32 lcdRgbKey = 0u
+        keel::u32 lcdRgbKey = 0u,
+        bool rotatedGlyph = false
     ) {
         if (!initialized) return;
+        keel::u16 clipIdx = curRoundedClipIdx;
+        if (clipIdx != 0u && !rotatedGlyph) {
+            const keel::f32 pad = (q.mode < 1.5f || q.mode > 5.5f) ? 2.0f : 0.0f;
+            clipIdx = EffectiveRoundedClipIdx(Rect(q.rx - pad, q.ry - pad, q.rw + pad * 2.0f, q.rh + pad * 2.0f));
+        }
         const keel::u32 qIdx = keel::as<keel::u32>(frameQuads.size());
         frameQuads.push_back(q);
 
@@ -1525,7 +1733,7 @@ struct GlEs3Canvas::Impl {
             const bool texCompat = (tex == 0u || last.tex == 0u || last.tex == tex);
             const bool blendCompat = (last.isLcd == isLcd) && (!isLcd || last.lcdRgbKey == lcdRgbKey);
             if (last.kind == BatchKind::Quads && texCompat && blendCompat &&
-                last.scissor == curScissor && last.roundedClipIdx == curRoundedClipIdx) {
+                last.scissor == curScissor && last.roundedClipIdx == clipIdx) {
                 if (last.tex == 0u && tex != 0u) {
                     last.tex = tex;
                 }
@@ -1542,7 +1750,7 @@ struct GlEs3Canvas::Impl {
             .isLcd = isLcd,
             .lcdRgbKey = lcdRgbKey,
             .scissor = curScissor,
-            .roundedClipIdx = curRoundedClipIdx
+            .roundedClipIdx = clipIdx
         });
     }
 
@@ -2038,13 +2246,14 @@ void GlEs3Canvas::PopClip() {
 void GlEs3Canvas::DrawRect(Rect rect, Color fill) {
     if (fill.a == 0u || rect.w <= 0.0f || rect.h <= 0.0f) return;
     const Rect pr = m_impl->PxRect(rect);
-    m_impl->PushQuad(QuadInstance{
+    if (m_impl->IsClippedOut(pr, 0.0f)) return;
+    m_impl->PushRect(QuadInstance{
         pr.x, pr.y, pr.w, pr.h,
         0.0f, 0.0f, 1.0f, 1.0f,
         fill.r / 255.0f, fill.g / 255.0f, fill.b / 255.0f, fill.a / 255.0f,
         0.0f, 0.0f, 0.0f, 0.0f,
         0.0f, 0.0f, kModeRoundRect, 0.0f
-    }, 0u);
+    });
 }
 
 void GlEs3Canvas::DrawRoundRect(
@@ -2061,16 +2270,17 @@ void GlEs3Canvas::DrawRoundRect(
 
     const keel::f32 eff = m_impl->EffScale();
     const Rect pr = m_impl->PxRect(rect);
+    if (m_impl->IsClippedOut(pr, 2.0f)) return;
     const keel::f32 rPx = keel::max(0.0f, radius * eff);
     const keel::f32 swPx = hasStroke ? keel::max(1.0f, strokeWidth * eff) : 0.0f;
 
-    m_impl->PushQuad(QuadInstance{
+    m_impl->PushRect(QuadInstance{
         pr.x, pr.y, pr.w, pr.h,
         0.0f, 0.0f, 1.0f, 1.0f,
         fill.r / 255.0f, fill.g / 255.0f, fill.b / 255.0f, fill.a / 255.0f,
         stroke.r / 255.0f, stroke.g / 255.0f, stroke.b / 255.0f, stroke.a / 255.0f,
         rPx, swPx, kModeRoundRect, 0.0f
-    }, 0u);
+    });
 }
 
 void GlEs3Canvas::DrawShadow(
@@ -2095,9 +2305,11 @@ void GlEs3Canvas::DrawShadow(
     const keel::f32 sigma = keel::max(0.0f, blurRadius * eff * 0.5f);
     const keel::f32 rPx = keel::clamp((cornerRadius + spread) * eff, 0.0f, keel::min(pr.w, pr.h) * 0.5f);
     const keel::f32 pad = keel::ceil(3.0f * sigma) + 1.0f;
+    const Rect shadowBounds(pr.x - pad, pr.y - pad, pr.w + pad * 2.0f, pr.h + pad * 2.0f);
+    if (m_impl->IsClippedOut(shadowBounds, 2.0f)) return;
 
     m_impl->PushQuad(QuadInstance{
-        pr.x - pad, pr.y - pad, pr.w + pad * 2.0f, pr.h + pad * 2.0f,
+        shadowBounds.x, shadowBounds.y, shadowBounds.w, shadowBounds.h,
         pr.w * 0.5f, pr.h * 0.5f, 0.0f, 0.0f,
         color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
         0.0f, 0.0f, 0.0f, 0.0f,
@@ -2252,7 +2464,7 @@ void GlEs3Canvas::DrawTextStyled(
                 color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f,
                 pivotX, pivotY, invContrast, gammaFlag,
                 cosA, sinA, glyphMode, effDarken
-            }, tex, useLcd, lcdRgbKey);
+            }, tex, useLcd, lcdRgbKey, hasRot);
         }
         penX += ag->advancePx;
         prevCp = cp;

@@ -524,9 +524,7 @@ struct X11PlatformWindow::Impl {
             EGLint samples;
         };
         static constexpr Profile kProfiles[] = {
-            {8, 1, 4}, // 4x MSAA + 8-bit stencil (crispest vector anti-aliasing + EvenOdd holes)
-            {8, 1, 2}, // 2x MSAA + 8-bit stencil
-            {8, 0, 0}, // 8-bit stencil without MSAA
+            {8, 0, 0}, // 8-bit stencil, 0 MSAA (all UI primitives use analytical SDF AA; avoids 4x fill-rate overhead)
             {0, 0, 0}  // Minimal RGBA8 fallback
         };
         for (const Profile& prof : kProfiles) {
