@@ -1281,7 +1281,7 @@ struct GlEs3Canvas::Impl {
 
     // Lazy GPU backdrop-blur & Glass SDF pipeline resources (0 VRAM / 0 cost when unused)
     static constexpr keel::usize kBlurLevels = 3u;
-    static constexpr keel::u32 kMaxBlurCapturesPerFrame = 24u;
+    static constexpr keel::u32 kMaxBlurCapturesPerFrame = 64u;
     bool fboSupported{false};
     bool glassInitFailed{false};
     bool usedGlassPrevFrame{false};
@@ -1290,7 +1290,7 @@ struct GlEs3Canvas::Impl {
     bool blurValid{false};
     bool backdropDirtyAny{false};
     Rect dirtyBackdropPx{};
-    Rect validBlurRectPx{};
+    keel::f32 cachedBlurOffset{0.0f};
     keel::u32 blurCapturesThisFrame{0};
 
     keel::u32 glassFbW{0};
@@ -1608,17 +1608,13 @@ struct GlEs3Canvas::Impl {
         return Rect(x0, y0, x1 - x0, y1 - y0);
     }
 
-    static bool RectContainsRect(Rect outer, Rect inner) noexcept {
-        if (outer.w <= 0.0f || outer.h <= 0.0f) return false;
-        return outer.x <= inner.x + 0.5f &&
-               outer.y <= inner.y + 0.5f &&
-               outer.Right() >= inner.Right() - 0.5f &&
-               outer.Bottom() >= inner.Bottom() - 0.5f;
-    }
-
     static bool RectsOverlap(Rect a, Rect b) noexcept {
         if (a.w <= 0.0f || a.h <= 0.0f || b.w <= 0.0f || b.h <= 0.0f) return false;
         return a.x < b.Right() && a.Right() > b.x && a.y < b.Bottom() && a.Bottom() > b.y;
+    }
+
+    static keel::f32 ComputeKawaseOffset(keel::f32 blurRadiusPx) noexcept {
+        return keel::clamp(blurRadiusPx * 0.14f, 0.85f, 2.8f);
     }
 
     void MarkBackdropDirty(Rect r) noexcept {
@@ -1632,6 +1628,7 @@ struct GlEs3Canvas::Impl {
         dirtyBackdropPx = Rect(0.0f, 0.0f, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
         backdropDirtyAny = true;
         blurValid = false;
+        cachedBlurOffset = 0.0f;
     }
 
     void ReleaseGlassFbos() noexcept {
@@ -1659,7 +1656,7 @@ struct GlEs3Canvas::Impl {
         sceneFbo = sceneTex = sceneStencilRbo = sceneSnapFbo = sceneSnapTex = 0u;
         glassFbW = glassFbH = 0u;
         blurValid = false;
-        validBlurRectPx = {};
+        cachedBlurOffset = 0.0f;
     }
 
     void ReleaseGlassAll() noexcept {
@@ -1839,12 +1836,12 @@ struct GlEs3Canvas::Impl {
         dirtyBackdropPx = Rect(0.0f, 0.0f, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
         backdropDirtyAny = true;
         blurValid = false;
-        validBlurRectPx = {};
+        cachedBlurOffset = 0.0f;
         return true;
     }
 
-    void RunDualKawaseBlur(Rect regionPx, keel::f32 blurRadiusPx, bool fullScreen) noexcept {
-        if (!renderingToSceneFbo || sceneFbo == 0u || sceneSnapFbo == 0u) return;
+    bool RunDualKawaseBlur(Rect regionPx, keel::f32 blurRadiusPx, bool fullScreen) noexcept {
+        if (!renderingToSceneFbo || sceneFbo == 0u || sceneSnapFbo == 0u) return false;
 
         const keel::f32 fbWf = keel::as<keel::f32>(fbWidth);
         const keel::f32 fbHf = keel::as<keel::f32>(fbHeight);
@@ -1869,7 +1866,7 @@ struct GlEs3Canvas::Impl {
         const GLint bx1 = keel::min(keel::as<GLint>(fbWidth), keel::ceil_i32(snapPx.Right()));
         const GLint by0 = keel::max(0, keel::as<GLint>(fbHeight) - keel::ceil_i32(snapPx.Bottom()));
         const GLint by1 = keel::min(keel::as<GLint>(fbHeight), keel::as<GLint>(fbHeight) - keel::floor_i32(snapPx.y));
-        if (bx1 <= bx0 || by1 <= by0) return;
+        if (bx1 <= bx0 || by1 <= by0) return false;
 
         gl.Disable(kGlScissorTest);
         gl.Disable(kGlBlend);
@@ -1879,7 +1876,7 @@ struct GlEs3Canvas::Impl {
         gl.BindFramebuffer(kGlDrawFramebuffer, sceneSnapFbo);
         gl.BlitFramebuffer(bx0, by0, bx1, by1, bx0, by0, bx1, by1, kGlColorBufferBit, kGlNearest);
 
-        const keel::f32 offset = keel::clamp(blurRadiusPx * 0.14f, 0.85f, 2.8f);
+        const keel::f32 offset = ComputeKawaseOffset(blurRadiusPx);
         gl.BindVertexArray(emptyVao);
         gl.ActiveTexture(kGlTexture0);
 
@@ -1939,12 +1936,47 @@ struct GlEs3Canvas::Impl {
         gl.Enable(kGlBlend);
         gl.BlendEquation(kGlFuncAdd);
         gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+        return true;
+    }
 
+    // Single owner of backdrop-blur cache invalidation.
+    // Invariant: once `blurValid` is true, the entire `sceneSnapTex`/`blurTex[0]` covers the viewport
+    // accurately everywhere outside `dirtyBackdropPx`. Any capture includes `dirtyBackdropPx` so
+    // clearing `backdropDirtyAny` can never leave uncaptured stale backdrop pixels behind.
+    bool EnsureGlassBlurReady(Rect needPx, keel::f32 blurRadiusPx) noexcept {
+        if (!renderingToSceneFbo || sceneFbo == 0u || sceneSnapFbo == 0u) return false;
+        if (blurCapturesThisFrame >= kMaxBlurCapturesPerFrame) return false;
+
+        const keel::f32 wantOffset = ComputeKawaseOffset(blurRadiusPx);
+        const keel::f32 offsetDiff = (wantOffset > cachedBlurOffset)
+            ? (wantOffset - cachedBlurOffset)
+            : (cachedBlurOffset - wantOffset);
+        const bool radiusChanged = blurValid && (offsetDiff > 0.75f);
+        const bool dirtyHitsNeed = backdropDirtyAny && RectsOverlap(dirtyBackdropPx, needPx);
+        if (blurValid && !dirtyHitsNeed && !radiusChanged) {
+            return false;
+        }
+
+        const Rect capturePx = backdropDirtyAny ? UnionRect(needPx, dirtyBackdropPx) : needPx;
+        const keel::f32 fbWf = keel::max(1.0f, keel::as<keel::f32>(fbWidth));
+        const keel::f32 fbHf = keel::max(1.0f, keel::as<keel::f32>(fbHeight));
+        const keel::f32 capArea = keel::max(0.0f, capturePx.w) * keel::max(0.0f, capturePx.h);
+        const bool fullScreen =
+            !blurValid ||
+            (capArea >= fbWf * fbHf * 0.45f) ||
+            (blurCapturesThisFrame + 1u >= kMaxBlurCapturesPerFrame);
+
+        if (!RunDualKawaseBlur(capturePx, blurRadiusPx, fullScreen)) {
+            return false;
+        }
         blurValid = true;
-        validBlurRectPx = fullScreen ? Rect(0.0f, 0.0f, fbWf, fbHf) : regionPx;
+        if (fullScreen) {
+            cachedBlurOffset = wantOffset;
+        }
         dirtyBackdropPx = {};
         backdropDirtyAny = false;
         ++blurCapturesThisFrame;
+        return true;
     }
 
     void PresentSceneFboToDefault() noexcept {
@@ -2443,13 +2475,7 @@ struct GlEs3Canvas::Impl {
                     keel::min(vpH, cmd.rectPx.Bottom() + pad) - keel::max(0.0f, cmd.rectPx.y - pad)
                 );
 
-                const bool needCapture =
-                    !impl.blurValid ||
-                    !Impl::RectContainsRect(impl.validBlurRectPx, needPx) ||
-                    (impl.backdropDirtyAny && Impl::RectsOverlap(impl.dirtyBackdropPx, needPx));
-                if (needCapture && impl.blurCapturesThisFrame < Impl::kMaxBlurCapturesPerFrame) {
-                    const bool fullScreen = (impl.blurCapturesThisFrame == 0u);
-                    impl.RunDualKawaseBlur(needPx, blurRadiusPx, fullScreen);
+                if (impl.EnsureGlassBlurReady(needPx, blurRadiusPx)) {
                     prog = 0u;
                     vao = 0u;
                     tex = 0u;
@@ -3156,7 +3182,7 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->blurValid = false;
     m_impl->backdropDirtyAny = false;
     m_impl->dirtyBackdropPx = Rect{};
-    m_impl->validBlurRectPx = Rect{};
+    m_impl->cachedBlurOffset = 0.0f;
     m_impl->blurCapturesThisFrame = 0u;
     ++m_impl->frameCounter;
 
