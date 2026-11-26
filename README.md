@@ -1,8 +1,8 @@
 # GuiKit Native Backend (`guikit::native`)
 
-Lightweight native platform windowing (X11, Wayland, Win32) and OpenGL ES 3.0 / GL 3.3 Core 2D renderer backend for **GuiKit**.
+GuiKit's own lightweight native platform windowing (`Win32`, `X11`, `Wayland`, `Emscripten`) and hardware-accelerated **OpenGL ES 3.0 / GL 3.3 Core / WebGL2** 2D vector & GLSL shader backend.
 
-Zero SDL3 and zero ThorVG dependencies — built directly on `guikit::core` (`IPlatformWindow`, `PlatformWindowBackend`, `ICanvas`) and optional `guikit::text`.
+Zero **SDL3**, zero **ThorVG**, and zero **FreeType** dependencies — built directly on `guikit::core` (`IPlatformWindow`, `PlatformWindowBackend`, `ICanvas`) and `guikit::text` (defaulting to the zero-dependency `keel::font` TrueType/OpenType rasterizer, with optional FreeType support).
 
 ## License
 
