@@ -79,6 +79,8 @@ using PfnSetProcessDPIAware = BOOL(WINAPI*)();
 using PfnGetDpiForWindow = UINT(WINAPI*)(HWND);
 using PfnAdjustWindowRectExForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
 using PfnDwmSetWindowAttribute = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+using PfnDwmFlush = HRESULT(WINAPI*)();
+using PfnDwmIsCompositionEnabled = HRESULT(WINAPI*)(BOOL*);
 using PfnImmGetContext = HIMC(WINAPI*)(HWND);
 using PfnImmReleaseContext = BOOL(WINAPI*)(HWND, HIMC);
 using PfnImmGetCompositionStringW = LONG(WINAPI*)(HIMC, DWORD, LPVOID, DWORD);
@@ -476,6 +478,11 @@ struct Win32PlatformWindow::Impl {
     PfnWglCreateContextAttribsArb wglCreateContextAttribsArb{nullptr};
     PfnWglSwapIntervalExt wglSwapIntervalExt{nullptr};
 
+    bool dwmProbed{false};
+    keel::Optional<keel::DynLib> dwmLib;
+    PfnDwmFlush dwmFlush{nullptr};
+    PfnDwmIsCompositionEnabled dwmIsCompositionEnabled{nullptr};
+
     bool immProbed{false};
     keel::Optional<keel::DynLib> imm32Lib;
     PfnImmGetContext immGetContext{nullptr};
@@ -497,6 +504,8 @@ struct Win32PlatformWindow::Impl {
     keel::f32 pixelsPerMm{96.0f / 25.4f};
     bool highDpi{true};
     bool vsync{true};
+    bool fullscreen{false};
+    bool dwmPacingActive{false};
     bool minimized{false};
     bool inSizeMove{false};
     bool liveResizeFrame{false};
@@ -545,8 +554,22 @@ struct Win32PlatformWindow::Impl {
         pendingHighSurrogate = 0u;
         inSizeMove = false;
         liveResizeFrame = false;
+        dwmPacingActive = false;
+        fullscreen = false;
         imeActive = false;
         lastImeCaretPx = {};
+    }
+
+    void EnsureDwmLoaded() noexcept {
+        if (dwmProbed) {
+            return;
+        }
+        dwmProbed = true;
+        if (auto lib = keel::DynLib::open("dwmapi.dll"); lib.is_ok()) {
+            dwmLib = keel::move(lib.value());
+            dwmFlush = dwmLib->symbol<PfnDwmFlush>("DwmFlush");
+            dwmIsCompositionEnabled = dwmLib->symbol<PfnDwmIsCompositionEnabled>("DwmIsCompositionEnabled");
+        }
     }
 
     void EnsureImmLoaded() noexcept {
@@ -648,6 +671,31 @@ struct Win32PlatformWindow::Impl {
         ::ReleaseDC(dummyHwnd, dummyDc);
         ::DestroyWindow(dummyHwnd);
         return true;
+    }
+
+    void ApplySwapInterval() noexcept {
+        dwmPacingActive = false;
+        if (!hglrc) return;
+        if (vsync && !fullscreen) {
+            EnsureDwmLoaded();
+            BOOL compEnabled = TRUE;
+            const bool dwmActive = dwmFlush &&
+                (!dwmIsCompositionEnabled ||
+                 (SUCCEEDED(dwmIsCompositionEnabled(&compEnabled)) && compEnabled == TRUE));
+            if (dwmActive) {
+                // On DWM-composited Windows desktops, windowed OpenGL is always presented tear-free
+                // by DWM. Setting swap interval 0 and pacing via DwmFlush() in WaitForVBlank()
+                // avoids double-vblank halving (30 FPS) and prevents driver stalls inside EndFrame().
+                dwmPacingActive = true;
+                if (wglSwapIntervalExt) {
+                    (void)wglSwapIntervalExt(0);
+                }
+                return;
+            }
+        }
+        if (wglSwapIntervalExt) {
+            (void)wglSwapIntervalExt(vsync ? 1 : 0);
+        }
     }
 
     bool InitWgl() noexcept {
@@ -752,9 +800,7 @@ struct Win32PlatformWindow::Impl {
             return false;
         }
 
-        if (wglSwapIntervalExt) {
-            (void)wglSwapIntervalExt(vsync ? 1 : 0);
-        }
+        ApplySwapInterval();
         return true;
     }
 
@@ -1206,6 +1252,7 @@ bool Win32PlatformWindow::Create(
     keel::i32 winX = CW_USEDEFAULT;
     keel::i32 winY = CW_USEDEFAULT;
 
+    m_impl->fullscreen = desc.fullscreen;
     if (desc.fullscreen) {
         reqW = ::GetSystemMetrics(SM_CXSCREEN);
         reqH = ::GetSystemMetrics(SM_CYSCREEN);
@@ -1378,6 +1425,22 @@ void Win32PlatformWindow::SwapBuffers() noexcept {
     }
 }
 
+void Win32PlatformWindow::WaitForVBlank() noexcept {
+    if (!m_impl || !m_impl->vsync || !m_impl->hglrc || !m_impl->dwmPacingActive) {
+        return;
+    }
+    if (m_impl->dwmFlush) {
+        if (FAILED(m_impl->dwmFlush())) {
+            // DWM composition became unavailable (e.g. RDP/headless transition): fall back to WGL swap interval
+            m_impl->dwmPacingActive = false;
+            if (m_impl->wglSwapIntervalExt) {
+                (void)MakeContextCurrent();
+                (void)m_impl->wglSwapIntervalExt(1);
+            }
+        }
+    }
+}
+
 GlProcAddressFn Win32PlatformWindow::GetGlProcAddressFn() const noexcept {
     return &WglProcLoaderThunk;
 }
@@ -1413,9 +1476,9 @@ bool Win32PlatformWindow::IsVsyncEnabled() const noexcept {
 void Win32PlatformWindow::SetVsyncEnabled(bool enabled) noexcept {
     if (!m_impl) return;
     m_impl->vsync = enabled;
-    if (m_impl->wglSwapIntervalExt && m_impl->hglrc) {
+    if (m_impl->hglrc) {
         (void)MakeContextCurrent();
-        (void)m_impl->wglSwapIntervalExt(enabled ? 1 : 0);
+        m_impl->ApplySwapInterval();
     }
 }
 
@@ -1468,6 +1531,7 @@ bool Win32PlatformWindow::PumpEvents(Context&, bool, keel::i32) { return false; 
 void Win32PlatformWindow::WakeUp() noexcept {}
 bool Win32PlatformWindow::MakeContextCurrent() noexcept { return false; }
 void Win32PlatformWindow::SwapBuffers() noexcept {}
+void Win32PlatformWindow::WaitForVBlank() noexcept {}
 GlProcAddressFn Win32PlatformWindow::GetGlProcAddressFn() const noexcept { return nullptr; }
 keel::i32 Win32PlatformWindow::GetFramebufferWidth() const noexcept { return 0; }
 keel::i32 Win32PlatformWindow::GetFramebufferHeight() const noexcept { return 0; }

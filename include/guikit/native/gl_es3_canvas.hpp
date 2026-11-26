@@ -160,6 +160,7 @@ public:
     bool DrawGpuShaderPass(const GpuShaderPassDesc& pass, bool punchHole = true) override;
 
     void TrimCaches() noexcept override;
+    [[nodiscard]] keel::Optional<keel::f32> GetLastGpuFrameTimeMs() const noexcept override;
 
     [[nodiscard]] keel::StringRef GetTextEngineName() const noexcept override;
     [[nodiscard]] bool SupportsFontHinting() const noexcept override;

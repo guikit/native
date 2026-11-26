@@ -765,11 +765,66 @@ struct GlEs3Canvas::Impl {
     keel::u32 transientTexW{0};
     keel::u32 transientTexH{0};
 
-    GLuint activeTex{0};
-    bool activeLcdBlend{false};
-    keel::u32 activeLcdRgbKey{0u};
-    keel::Array<QuadInstance> quadBatch;
-    keel::Array<TriVertex> triBatch;
+    struct ScissorState {
+        bool enabled{false};
+        GLint x{0};
+        GLint y{0};
+        GLsizei w{0};
+        GLsizei h{0};
+
+        bool operator==(const ScissorState& o) const noexcept {
+            if (enabled != o.enabled) return false;
+            return !enabled || (x == o.x && y == o.y && w == o.w && h == o.h);
+        }
+        bool operator!=(const ScissorState& o) const noexcept { return !(*this == o); }
+    };
+
+    struct RoundedClipSnapshot {
+        keel::u8 count{0};
+        keel::f32 rects[16]{};
+        keel::f32 radii[4]{};
+
+        bool operator==(const RoundedClipSnapshot& o) const noexcept {
+            if (count != o.count) return false;
+            for (keel::u8 i = 0u; i < count; ++i) {
+                if (radii[i] != o.radii[i]) return false;
+                for (keel::u8 k = 0u; k < 4u; ++k) {
+                    if (rects[i * 4u + k] != o.rects[i * 4u + k]) return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    enum class BatchKind : keel::u8 { Quads = 0, Tris = 1 };
+
+    struct DrawBatch {
+        BatchKind kind{BatchKind::Quads};
+        keel::u32 first{0};
+        keel::u32 count{0};
+        GLuint tex{0};
+        bool isLcd{false};
+        keel::u32 lcdRgbKey{0u};
+        ScissorState scissor{};
+        keel::u16 roundedClipIdx{0u};
+    };
+
+    static constexpr keel::usize kTimerQueryCount = 4u;
+    bool timerQueriesSupported{false};
+    bool timerQueryInFlight{false};
+    GLuint timerQueries[kTimerQueryCount]{};
+    bool timerQueryPending[kTimerQueryCount]{};
+    keel::usize timerQueryWriteIdx{0};
+    keel::usize timerQueryReadIdx{0};
+    keel::f32 lastGpuFrameTimeMs{0.0f};
+    bool hasLastGpuFrameTime{false};
+
+    keel::Array<QuadInstance> frameQuads;
+    keel::Array<TriVertex> frameTris;
+    keel::Array<DrawBatch> drawBatches;
+    keel::Array<RoundedClipSnapshot> roundedClipTable;
+    ScissorState curScissor{};
+    keel::u16 curRoundedClipIdx{0u};
 
     keel::u32 fbWidth{0};
     keel::u32 fbHeight{0};
@@ -940,7 +995,8 @@ struct GlEs3Canvas::Impl {
         gl.TexParameteri(kGlTexture2D, kGlTextureWrapT, keel::as<GLint>(kGlClampToEdge));
 
         gl.BindTexture(kGlTexture2D, 0);
-        activeTex = whiteTex;
+        roundedClipTable.clear();
+        roundedClipTable.push_back(RoundedClipSnapshot{});
 
         // Query active MSAA sample count & default framebuffer stencil bit depth
         if (gl.GetIntegerv) {
@@ -973,6 +1029,12 @@ struct GlEs3Canvas::Impl {
         }
         if (stencilBits > 0 && gl.ClearStencil) {
             gl.ClearStencil(0);
+        }
+
+        if (isDesktopGl && gl.GenQueries && gl.DeleteQueries && gl.BeginQuery && gl.EndQuery &&
+            gl.GetQueryObjectiv && gl.GetQueryObjectui64v) {
+            gl.GenQueries(keel::as<GLsizei>(kTimerQueryCount), timerQueries);
+            timerQueriesSupported = (timerQueries[0] != 0u);
         }
 
         initialized = true;
@@ -1028,6 +1090,19 @@ struct GlEs3Canvas::Impl {
         }
         ReleaseGpuPassCaches();
         ReleaseImageCache();
+        if (timerQueriesSupported && gl.DeleteQueries) {
+            gl.DeleteQueries(keel::as<GLsizei>(kTimerQueryCount), timerQueries);
+        }
+        for (keel::usize i = 0u; i < kTimerQueryCount; ++i) {
+            timerQueries[i] = 0u;
+            timerQueryPending[i] = false;
+        }
+        timerQueriesSupported = false;
+        timerQueryInFlight = false;
+        timerQueryWriteIdx = 0u;
+        timerQueryReadIdx = 0u;
+        lastGpuFrameTimeMs = 0.0f;
+        hasLastGpuFrameTime = false;
         if (transientPixelsTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &transientPixelsTex);
         if (atlasLcdTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &atlasLcdTex);
         if (atlasTex != 0u && gl.DeleteTextures) gl.DeleteTextures(1, &atlasTex);
@@ -1141,98 +1216,45 @@ struct GlEs3Canvas::Impl {
         return gpuPrograms.get(shaderId);
     }
 
-    void UploadRoundedClipUniforms(GLint locCount, GLint locRects, GLint locRadii) {
-        const keel::usize total = roundedClipStack.size();
-        const keel::usize start = (total > 4u) ? (total - 4u) : 0u;
-        const GLint count = keel::as<GLint>(total - start);
-        if (locCount >= 0) {
-            gl.Uniform1i(locCount, count);
-        }
-        if (count > 0) {
-            keel::f32 rects[16]{};
-            keel::f32 radii[4]{};
-            for (GLint i = 0; i < count; ++i) {
-                const RoundedClipEntry& e = roundedClipStack[start + keel::as<keel::usize>(i)];
-                const keel::f32 hw = e.rect.w * 0.5f;
-                const keel::f32 hh = e.rect.h * 0.5f;
-                rects[i * 4 + 0] = e.rect.x + hw;
-                rects[i * 4 + 1] = e.rect.y + hh;
-                rects[i * 4 + 2] = hw;
-                rects[i * 4 + 3] = hh;
-                radii[i] = e.radius;
-            }
-            if (locRects >= 0 && gl.Uniform4fv) {
-                gl.Uniform4fv(locRects, count, rects);
-            }
-            if (locRadii >= 0 && gl.Uniform4f) {
-                gl.Uniform4f(locRadii, radii[0], radii[1], radii[2], radii[3]);
-            }
+    void PollTimerQueries() noexcept {
+        if (!initialized || !timerQueriesSupported) return;
+        while (timerQueryPending[timerQueryReadIdx]) {
+            GLint available = 0;
+            gl.GetQueryObjectiv(timerQueries[timerQueryReadIdx], kGlQueryResultAvailable, &available);
+            if (available == 0) break;
+            GLuint64 elapsedNs = 0u;
+            gl.GetQueryObjectui64v(timerQueries[timerQueryReadIdx], kGlQueryResult, &elapsedNs);
+            lastGpuFrameTimeMs = keel::as<keel::f32>(keel::as<keel::f64>(elapsedNs) * 1e-6);
+            hasLastGpuFrameTime = true;
+            timerQueryPending[timerQueryReadIdx] = false;
+            timerQueryReadIdx = (timerQueryReadIdx + 1u) % kTimerQueryCount;
         }
     }
 
-    void FlushQuads() {
-        if (!initialized || quadBatch.empty()) return;
-
-        if (activeLcdBlend) {
-            const keel::f32 cr = keel::as<keel::f32>(activeLcdRgbKey & 0xFFu) / 255.0f;
-            const keel::f32 cg = keel::as<keel::f32>((activeLcdRgbKey >> 8) & 0xFFu) / 255.0f;
-            const keel::f32 cb = keel::as<keel::f32>((activeLcdRgbKey >> 16) & 0xFFu) / 255.0f;
-            gl.BlendColor(cr, cg, cb, 1.0f);
-            gl.BlendFuncSeparate(kGlConstantColor, kGlOneMinusSrcColor, kGlOne, kGlOneMinusSrcAlpha);
-        }
-
-        gl.UseProgram(quadProg);
-        gl.Uniform2f(quadUniformViewport, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
-        gl.Uniform1i(quadUniformTex, 0);
-        UploadRoundedClipUniforms(quadUniformClipCount, quadUniformClipRects, quadUniformClipRadii);
-        gl.ActiveTexture(kGlTexture0);
-        gl.BindTexture(kGlTexture2D, activeTex ? activeTex : whiteTex);
-
-        gl.BindVertexArray(quadVao);
-        gl.BindBuffer(kGlArrayBuffer, quadInstanceVbo);
-        const keel::usize byteSize = quadBatch.size() * sizeof(QuadInstance);
-        if (byteSize > quadVboCapacity) {
-            quadVboCapacity = keel::max(byteSize, quadVboCapacity * 2u + 4096u);
-            gl.BufferData(kGlArrayBuffer, keel::as<GLsizeiptr>(quadVboCapacity), nullptr, kGlStreamDraw);
-        }
-        gl.BufferSubData(kGlArrayBuffer, 0, keel::as<GLsizeiptr>(byteSize), quadBatch.data());
-        gl.DrawArraysInstanced(kGlTriangles, 0, 6, keel::as<GLsizei>(quadBatch.size()));
-        quadBatch.clear();
-
-        if (activeLcdBlend) {
-            gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
-        }
-    }
-
-    void FlushTris() {
-        if (!initialized || triBatch.empty()) return;
-
-        gl.UseProgram(triProg);
-        gl.Uniform2f(triUniformViewport, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight));
-        UploadRoundedClipUniforms(triUniformClipCount, triUniformClipRects, triUniformClipRadii);
-
-        gl.BindVertexArray(triVao);
-        gl.BindBuffer(kGlArrayBuffer, triVbo);
-        const keel::usize byteSize = triBatch.size() * sizeof(TriVertex);
-        if (byteSize > triVboCapacity) {
-            triVboCapacity = keel::max(byteSize, triVboCapacity * 2u + 4096u);
-            gl.BufferData(kGlArrayBuffer, keel::as<GLsizeiptr>(triVboCapacity), nullptr, kGlStreamDraw);
-        }
-        gl.BufferSubData(kGlArrayBuffer, 0, keel::as<GLsizeiptr>(byteSize), triBatch.data());
-        gl.DrawArrays(kGlTriangles, 0, keel::as<GLsizei>(triBatch.size()));
-        triBatch.clear();
-    }
-
-    void FlushAll() {
-        FlushQuads();
-        FlushTris();
-    }
-
-    void ApplyClip() {
-        if (!initialized) return;
-        if (clipStack.empty()) {
-            gl.Disable(kGlScissorTest);
+    void BeginTimerQuery() noexcept {
+        PollTimerQueries();
+        if (!initialized || !timerQueriesSupported || timerQueryInFlight || timerQueryPending[timerQueryWriteIdx]) {
             return;
+        }
+        gl.BeginQuery(kGlTimeElapsed, timerQueries[timerQueryWriteIdx]);
+        timerQueryInFlight = true;
+    }
+
+    void EndTimerQuery() noexcept {
+        if (!initialized || !timerQueriesSupported || !timerQueryInFlight) {
+            return;
+        }
+        gl.EndQuery(kGlTimeElapsed);
+        timerQueryInFlight = false;
+        timerQueryPending[timerQueryWriteIdx] = true;
+        timerQueryWriteIdx = (timerQueryWriteIdx + 1u) % kTimerQueryCount;
+        PollTimerQueries();
+    }
+
+    [[nodiscard]] ScissorState ComputeCurrentScissor() const noexcept {
+        ScissorState st{};
+        if (clipStack.empty()) {
+            return st;
         }
         const Rect& cr = clipStack.back();
         const GLint x0 = keel::max(0, keel::floor_i32(cr.x));
@@ -1242,8 +1264,250 @@ struct GlEs3Canvas::Impl {
         const GLsizei w = keel::max(0, x1 - x0);
         const GLsizei h = keel::max(0, y1Top - y0Top);
         const GLint glY = keel::as<GLint>(fbHeight) - y1Top;
+        st.enabled = true;
+        st.x = x0;
+        st.y = keel::max(0, glY);
+        st.w = w;
+        st.h = h;
+        return st;
+    }
+
+    void RefreshClipState() {
+        curScissor = ComputeCurrentScissor();
+        if (roundedClipStack.empty()) {
+            curRoundedClipIdx = 0u;
+            return;
+        }
+        RoundedClipSnapshot snap{};
+        const keel::usize total = roundedClipStack.size();
+        const keel::usize start = (total > 4u) ? (total - 4u) : 0u;
+        snap.count = keel::as<keel::u8>(total - start);
+        for (keel::u8 i = 0u; i < snap.count; ++i) {
+            const RoundedClipEntry& e = roundedClipStack[start + keel::as<keel::usize>(i)];
+            const keel::f32 hw = e.rect.w * 0.5f;
+            const keel::f32 hh = e.rect.h * 0.5f;
+            snap.rects[i * 4u + 0u] = e.rect.x + hw;
+            snap.rects[i * 4u + 1u] = e.rect.y + hh;
+            snap.rects[i * 4u + 2u] = hw;
+            snap.rects[i * 4u + 3u] = hh;
+            snap.radii[i] = e.radius;
+        }
+        if (roundedClipTable.empty()) {
+            roundedClipTable.push_back(RoundedClipSnapshot{});
+        }
+        if (roundedClipTable.back() == snap) {
+            curRoundedClipIdx = keel::as<keel::u16>(roundedClipTable.size() - 1u);
+            return;
+        }
+        if (roundedClipTable.size() < 65535u) {
+            curRoundedClipIdx = keel::as<keel::u16>(roundedClipTable.size());
+            roundedClipTable.push_back(snap);
+        } else {
+            curRoundedClipIdx = keel::as<keel::u16>(roundedClipTable.size() - 1u);
+        }
+    }
+
+    void UploadRoundedClipSnapshot(const RoundedClipSnapshot& snap, GLint locCount, GLint locRects, GLint locRadii) {
+        if (locCount >= 0) {
+            gl.Uniform1i(locCount, keel::as<GLint>(snap.count));
+        }
+        if (snap.count > 0u) {
+            if (locRects >= 0 && gl.Uniform4fv) {
+                gl.Uniform4fv(locRects, keel::as<GLsizei>(snap.count), snap.rects);
+            }
+            if (locRadii >= 0 && gl.Uniform4f) {
+                gl.Uniform4f(locRadii, snap.radii[0], snap.radii[1], snap.radii[2], snap.radii[3]);
+            }
+        }
+    }
+
+    void UploadOrphanedVbo(
+        GLuint vbo,
+        keel::usize& capacity,
+        keel::usize minCapacity,
+        const void* data,
+        keel::usize byteSize
+    ) noexcept {
+        gl.BindBuffer(kGlArrayBuffer, vbo);
+        if (byteSize > capacity) {
+            capacity = keel::max(byteSize, keel::max(minCapacity, capacity * 2u));
+        }
+        gl.BufferData(kGlArrayBuffer, keel::as<GLsizeiptr>(capacity), nullptr, kGlStreamDraw);
+        gl.BufferSubData(kGlArrayBuffer, 0, keel::as<GLsizeiptr>(byteSize), data);
+    }
+
+    void FlushAll() {
+        if (!initialized || drawBatches.empty()) {
+            frameQuads.clear();
+            frameTris.clear();
+            drawBatches.clear();
+            return;
+        }
+
+        if (!frameQuads.empty()) {
+            UploadOrphanedVbo(
+                quadInstanceVbo,
+                quadVboCapacity,
+                65536u,
+                frameQuads.data(),
+                frameQuads.size() * sizeof(QuadInstance)
+            );
+        }
+        if (!frameTris.empty()) {
+            UploadOrphanedVbo(
+                triVbo,
+                triVboCapacity,
+                16384u,
+                frameTris.data(),
+                frameTris.size() * sizeof(TriVertex)
+            );
+        }
+
+        struct ReplayState {
+            Impl& impl;
+            keel::f32 vpW{0.0f};
+            keel::f32 vpH{0.0f};
+            GLuint prog{0u};
+            GLuint vao{0u};
+            GLuint tex{0u};
+            bool lcd{false};
+            keel::u32 lcdRgb{0u};
+            bool scissorKnown{false};
+            ScissorState scissor{};
+            keel::u16 quadClipIdx{0xFFFFu};
+            keel::u16 triClipIdx{0xFFFFu};
+            keel::usize quadBaseBytes{keel::Limits<keel::usize>::kMax};
+
+            void SetScissor(const ScissorState& want) noexcept {
+                if (scissorKnown && want == scissor) return;
+                if (want.enabled) {
+                    impl.gl.Enable(kGlScissorTest);
+                    impl.gl.Scissor(want.x, want.y, want.w, want.h);
+                } else {
+                    impl.gl.Disable(kGlScissorTest);
+                }
+                scissor = want;
+                scissorKnown = true;
+            }
+
+            void SetBlend(bool wantLcd, keel::u32 wantRgb) noexcept {
+                if (wantLcd == lcd && (!wantLcd || wantRgb == lcdRgb)) return;
+                if (wantLcd) {
+                    const keel::f32 cr = keel::as<keel::f32>(wantRgb & 0xFFu) / 255.0f;
+                    const keel::f32 cg = keel::as<keel::f32>((wantRgb >> 8) & 0xFFu) / 255.0f;
+                    const keel::f32 cb = keel::as<keel::f32>((wantRgb >> 16) & 0xFFu) / 255.0f;
+                    impl.gl.BlendColor(cr, cg, cb, 1.0f);
+                    impl.gl.BlendFuncSeparate(kGlConstantColor, kGlOneMinusSrcColor, kGlOne, kGlOneMinusSrcAlpha);
+                } else {
+                    impl.gl.BlendFuncSeparate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+                }
+                lcd = wantLcd;
+                lcdRgb = wantRgb;
+            }
+
+            void ReplayQuads(const DrawBatch& b) noexcept {
+                if (prog != impl.quadProg) {
+                    impl.gl.UseProgram(impl.quadProg);
+                    impl.gl.Uniform2f(impl.quadUniformViewport, vpW, vpH);
+                    impl.gl.Uniform1i(impl.quadUniformTex, 0);
+                    prog = impl.quadProg;
+                }
+                if (b.roundedClipIdx != quadClipIdx) {
+                    const keel::usize idx = (b.roundedClipIdx < impl.roundedClipTable.size()) ? b.roundedClipIdx : 0u;
+                    impl.UploadRoundedClipSnapshot(
+                        impl.roundedClipTable[idx],
+                        impl.quadUniformClipCount,
+                        impl.quadUniformClipRects,
+                        impl.quadUniformClipRadii
+                    );
+                    quadClipIdx = b.roundedClipIdx;
+                }
+                if (vao != impl.quadVao) {
+                    impl.gl.BindVertexArray(impl.quadVao);
+                    impl.gl.BindBuffer(kGlArrayBuffer, impl.quadInstanceVbo);
+                    vao = impl.quadVao;
+                }
+                const GLuint wantTex = b.tex ? b.tex : impl.whiteTex;
+                if (tex != wantTex) {
+                    impl.gl.ActiveTexture(kGlTexture0);
+                    impl.gl.BindTexture(kGlTexture2D, wantTex);
+                    tex = wantTex;
+                }
+                SetBlend(b.isLcd, b.lcdRgbKey);
+
+                const keel::usize baseBytes = keel::as<keel::usize>(b.first) * sizeof(QuadInstance);
+                if (baseBytes != quadBaseBytes) {
+                    const GLsizei stride = keel::as<GLsizei>(sizeof(QuadInstance));
+                    for (GLuint loc = 0u; loc < 5u; ++loc) {
+                        const keel::usize off = baseBytes + keel::as<keel::usize>(loc) * 4u * sizeof(keel::f32);
+                        impl.gl.VertexAttribPointer(loc, 4, kGlFloat, kGlFalse, stride, reinterpret_cast<const void*>(off));
+                    }
+                    quadBaseBytes = baseBytes;
+                }
+                impl.gl.DrawArraysInstanced(kGlTriangles, 0, 6, keel::as<GLsizei>(b.count));
+            }
+
+            void ReplayTris(const DrawBatch& b) noexcept {
+                SetBlend(false, 0u);
+                if (prog != impl.triProg) {
+                    impl.gl.UseProgram(impl.triProg);
+                    impl.gl.Uniform2f(impl.triUniformViewport, vpW, vpH);
+                    prog = impl.triProg;
+                }
+                if (b.roundedClipIdx != triClipIdx) {
+                    const keel::usize idx = (b.roundedClipIdx < impl.roundedClipTable.size()) ? b.roundedClipIdx : 0u;
+                    impl.UploadRoundedClipSnapshot(
+                        impl.roundedClipTable[idx],
+                        impl.triUniformClipCount,
+                        impl.triUniformClipRects,
+                        impl.triUniformClipRadii
+                    );
+                    triClipIdx = b.roundedClipIdx;
+                }
+                if (vao != impl.triVao) {
+                    impl.gl.BindVertexArray(impl.triVao);
+                    vao = impl.triVao;
+                }
+                impl.gl.DrawArrays(kGlTriangles, keel::as<GLint>(b.first), keel::as<GLsizei>(b.count));
+            }
+        } state{*this, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight)};
+
+        for (const DrawBatch& b : drawBatches) {
+            if (b.count == 0u) continue;
+            state.SetScissor(b.scissor);
+            if (b.kind == BatchKind::Quads) {
+                state.ReplayQuads(b);
+            } else {
+                state.ReplayTris(b);
+            }
+        }
+        state.SetBlend(false, 0u);
+
+        frameQuads.clear();
+        frameTris.clear();
+        drawBatches.clear();
+        roundedClipTable.clear();
+        roundedClipTable.push_back(RoundedClipSnapshot{});
+        RefreshClipState();
+    }
+
+    void FlushQuads() {
+        FlushAll();
+    }
+
+    void FlushTris() {
+        FlushAll();
+    }
+
+    void ApplyClip() {
+        if (!initialized) return;
+        const ScissorState st = ComputeCurrentScissor();
+        if (!st.enabled) {
+            gl.Disable(kGlScissorTest);
+            return;
+        }
         gl.Enable(kGlScissorTest);
-        gl.Scissor(x0, keel::max(0, glY), w, h);
+        gl.Scissor(st.x, st.y, st.w, st.h);
     }
 
     void PushQuad(
@@ -1253,34 +1517,65 @@ struct GlEs3Canvas::Impl {
         keel::u32 lcdRgbKey = 0u
     ) {
         if (!initialized) return;
-        if (!triBatch.empty()) {
-            FlushTris();
-        }
-        const bool texChanged = (tex != 0u && tex != activeTex);
-        const bool blendChanged = (isLcd != activeLcdBlend) || (isLcd && lcdRgbKey != activeLcdRgbKey);
-        if (texChanged || blendChanged) {
-            FlushQuads();
-            if (tex != 0u) {
-                activeTex = tex;
+        const keel::u32 qIdx = keel::as<keel::u32>(frameQuads.size());
+        frameQuads.push_back(q);
+
+        if (!drawBatches.empty()) {
+            DrawBatch& last = drawBatches.back();
+            const bool texCompat = (tex == 0u || last.tex == 0u || last.tex == tex);
+            const bool blendCompat = (last.isLcd == isLcd) && (!isLcd || last.lcdRgbKey == lcdRgbKey);
+            if (last.kind == BatchKind::Quads && texCompat && blendCompat &&
+                last.scissor == curScissor && last.roundedClipIdx == curRoundedClipIdx) {
+                if (last.tex == 0u && tex != 0u) {
+                    last.tex = tex;
+                }
+                ++last.count;
+                return;
             }
-            activeLcdBlend = isLcd;
-            activeLcdRgbKey = lcdRgbKey;
         }
-        quadBatch.push_back(q);
+
+        drawBatches.push_back(DrawBatch{
+            .kind = BatchKind::Quads,
+            .first = qIdx,
+            .count = 1u,
+            .tex = tex,
+            .isLcd = isLcd,
+            .lcdRgbKey = lcdRgbKey,
+            .scissor = curScissor,
+            .roundedClipIdx = curRoundedClipIdx
+        });
     }
 
     void PushTri(Vec2 a, Vec2 b, Vec2 c, Color col) {
         if (!initialized || col.a == 0u) return;
-        if (!quadBatch.empty()) {
-            FlushQuads();
-        }
+        const keel::u32 firstIdx = keel::as<keel::u32>(frameTris.size());
         const keel::f32 r = col.r / 255.0f;
         const keel::f32 g = col.g / 255.0f;
         const keel::f32 bl = col.b / 255.0f;
         const keel::f32 al = col.a / 255.0f;
-        triBatch.push_back(TriVertex{a.x, a.y, r, g, bl, al});
-        triBatch.push_back(TriVertex{b.x, b.y, r, g, bl, al});
-        triBatch.push_back(TriVertex{c.x, c.y, r, g, bl, al});
+        frameTris.push_back(TriVertex{a.x, a.y, r, g, bl, al});
+        frameTris.push_back(TriVertex{b.x, b.y, r, g, bl, al});
+        frameTris.push_back(TriVertex{c.x, c.y, r, g, bl, al});
+
+        if (!drawBatches.empty()) {
+            DrawBatch& last = drawBatches.back();
+            if (last.kind == BatchKind::Tris &&
+                last.scissor == curScissor && last.roundedClipIdx == curRoundedClipIdx) {
+                last.count += 3u;
+                return;
+            }
+        }
+
+        drawBatches.push_back(DrawBatch{
+            .kind = BatchKind::Tris,
+            .first = firstIdx,
+            .count = 3u,
+            .tex = 0u,
+            .isLcd = false,
+            .lcdRgbKey = 0u,
+            .scissor = curScissor,
+            .roundedClipIdx = curRoundedClipIdx
+        });
     }
 
 #if GUIKIT_HAS_TEXT_RASTERIZER
@@ -1606,14 +1901,19 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->transformStack.clear();
     m_impl->clipStack.clear();
     m_impl->roundedClipStack.clear();
-    m_impl->quadBatch.clear();
-    m_impl->triBatch.clear();
-    m_impl->activeLcdBlend = false;
-    m_impl->activeLcdRgbKey = 0u;
+    m_impl->frameQuads.clear();
+    m_impl->frameTris.clear();
+    m_impl->drawBatches.clear();
+    m_impl->roundedClipTable.clear();
+    m_impl->roundedClipTable.push_back(Impl::RoundedClipSnapshot{});
+    m_impl->curScissor = Impl::ScissorState{};
+    m_impl->curRoundedClipIdx = 0u;
     m_impl->activeGpuPassesThisFrame = 0u;
     ++m_impl->frameCounter;
 
     if (!m_impl->initialized) return;
+
+    m_impl->BeginTimerQuery();
 
     auto& gl = m_impl->gl;
     gl.Viewport(0, 0, keel::as<GLsizei>(width), keel::as<GLsizei>(height));
@@ -1633,6 +1933,7 @@ void GlEs3Canvas::End() {
     if (!m_impl->initialized) return;
     m_impl->FlushAll();
     m_impl->gl.Disable(kGlScissorTest);
+    m_impl->EndTimerQuery();
 }
 
 keel::f32 GlEs3Canvas::GetScale() const noexcept {
@@ -1706,7 +2007,6 @@ void GlEs3Canvas::PushClip(Rect clipRect) {
 }
 
 void GlEs3Canvas::PushRoundedClip(Rect clipRect, keel::f32 cornerRadius) {
-    m_impl->FlushAll();
     const Rect mapped = m_impl->PxRect(clipRect);
     const keel::f32 rPx = cornerRadius * m_impl->EffScale();
     if (!m_impl->clipStack.empty()) {
@@ -1722,18 +2022,17 @@ void GlEs3Canvas::PushRoundedClip(Rect clipRect, keel::f32 cornerRadius) {
             m_impl->clipStack.size()
         });
     }
-    m_impl->ApplyClip();
+    m_impl->RefreshClipState();
 }
 
 void GlEs3Canvas::PopClip() {
     if (m_impl->clipStack.empty()) return;
-    m_impl->FlushAll();
     const keel::usize poppedDepth = m_impl->clipStack.size();
     m_impl->clipStack.pop_back();
     while (!m_impl->roundedClipStack.empty() && m_impl->roundedClipStack.back().depth >= poppedDepth) {
         m_impl->roundedClipStack.pop_back();
     }
-    m_impl->ApplyClip();
+    m_impl->RefreshClipState();
 }
 
 void GlEs3Canvas::DrawRect(Rect rect, Color fill) {
@@ -1992,12 +2291,15 @@ void GlEs3Canvas::DrawTextBoxStyled(
 
     keel::FixedString<256> truncated;
     keel::StringRef drawStr = text;
-    if (MeasureTextStyled(text, fontSize, style).x > bounds.w + kTextSubpixelTolerance) {
+    Vec2 dims = MeasureTextStyled(text, fontSize, style);
+    bool wasTruncated = false;
+    if (dims.x > bounds.w + kTextSubpixelTolerance) {
         truncated = TextUtil::TruncateWithEllipsis(text, bounds.w, fontSize, this);
         drawStr = truncated;
+        dims = MeasureTextStyled(drawStr, fontSize, style);
+        wasTruncated = true;
     }
 
-    const Vec2 dims = MeasureTextStyled(drawStr, fontSize, style);
     const keel::f32 x = bounds.x + keel::max(0.0f, (bounds.w - dims.x) * alignX);
     keel::f32 y = bounds.y + (bounds.h - dims.y) * alignY;
 
@@ -2018,9 +2320,16 @@ void GlEs3Canvas::DrawTextBoxStyled(
 #endif
 
     const keel::f32 vPad = keel::max(4.0f, fontSize * 0.35f);
-    PushClip(Rect(bounds.x - 2.0f, bounds.y - vPad, bounds.w + 4.0f, bounds.h + vPad * 2.0f));
+    const bool needsClip = wasTruncated ||
+        (dims.x > bounds.w + 0.5f) ||
+        (dims.y > bounds.h + vPad * 2.0f);
+    if (needsClip) {
+        PushClip(Rect(bounds.x - 2.0f, bounds.y - vPad, bounds.w + 4.0f, bounds.h + vPad * 2.0f));
+    }
     DrawTextStyled(drawStr, {x, y}, fontSize, color, style, 0.0f);
-    PopClip();
+    if (needsClip) {
+        PopClip();
+    }
 }
 
 void GlEs3Canvas::DrawLine(Vec2 p1, Vec2 p2, Color color, keel::f32 strokeWidth) {
@@ -2697,11 +3006,14 @@ void GlEs3Canvas::TrimCaches() noexcept {
     m_impl->lcdUploadScratch = {};
 #endif
     m_impl->gpuRgbaScratch = {};
-    if (m_impl->quadBatch.empty() && m_impl->quadBatch.capacity() > 4096u) {
-        m_impl->quadBatch = {};
+    if (m_impl->frameQuads.empty() && m_impl->frameQuads.capacity() > 4096u) {
+        m_impl->frameQuads = {};
     }
-    if (m_impl->triBatch.empty() && m_impl->triBatch.capacity() > 8192u) {
-        m_impl->triBatch = {};
+    if (m_impl->frameTris.empty() && m_impl->frameTris.capacity() > 8192u) {
+        m_impl->frameTris = {};
+    }
+    if (m_impl->drawBatches.empty() && m_impl->drawBatches.capacity() > 512u) {
+        m_impl->drawBatches = {};
     }
 
     // Evict GPU shader textures for widgets that are no longer active on screen
@@ -2743,6 +3055,13 @@ void GlEs3Canvas::TrimCaches() noexcept {
             m_impl->imageCache.remove(key);
         }
     }
+}
+
+keel::Optional<keel::f32> GlEs3Canvas::GetLastGpuFrameTimeMs() const noexcept {
+    if (m_impl && m_impl->hasLastGpuFrameTime) {
+        return m_impl->lastGpuFrameTimeMs;
+    }
+    return keel::kNullOpt;
 }
 
 keel::StringRef GlEs3Canvas::GetTextEngineName() const noexcept {

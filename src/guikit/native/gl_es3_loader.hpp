@@ -21,6 +21,7 @@ using GLfloat = keel::f32;
 using GLchar = char;
 using GLsizeiptr = keel::isize;
 using GLintptr = keel::isize;
+using GLuint64 = keel::u64;
 
 #if defined(_WIN32)
 #define GUIKIT_GL_APIENTRY __stdcall
@@ -99,6 +100,10 @@ static constexpr GLenum kGlVendor = 0x1F00u;
 static constexpr GLenum kGlRenderer = 0x1F01u;
 static constexpr GLenum kGlVersion = 0x1F02u;
 
+static constexpr GLenum kGlQueryResult = 0x8866u;
+static constexpr GLenum kGlQueryResultAvailable = 0x8867u;
+static constexpr GLenum kGlTimeElapsed = 0x88BFu;
+
 struct GlEs3Api {
 #if !defined(__EMSCRIPTEN__)
     keel::DynLib fallbackLib;
@@ -173,6 +178,13 @@ struct GlEs3Api {
     using PfnTexSubImage2D = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
     using PfnDeleteTextures = void(GUIKIT_GL_APIENTRY*)(GLsizei n, const GLuint* textures);
 
+    using PfnGenQueries = void(GUIKIT_GL_APIENTRY*)(GLsizei n, GLuint* ids);
+    using PfnDeleteQueries = void(GUIKIT_GL_APIENTRY*)(GLsizei n, const GLuint* ids);
+    using PfnBeginQuery = void(GUIKIT_GL_APIENTRY*)(GLenum target, GLuint id);
+    using PfnEndQuery = void(GUIKIT_GL_APIENTRY*)(GLenum target);
+    using PfnGetQueryObjectiv = void(GUIKIT_GL_APIENTRY*)(GLuint id, GLenum pname, GLint* params);
+    using PfnGetQueryObjectui64v = void(GUIKIT_GL_APIENTRY*)(GLuint id, GLenum pname, GLuint64* params);
+
     PfnGetString GetString{nullptr};
     PfnGetError GetError{nullptr};
     PfnGetIntegerv GetIntegerv{nullptr};
@@ -241,6 +253,13 @@ struct GlEs3Api {
     PfnTexImage2D TexImage2D{nullptr};
     PfnTexSubImage2D TexSubImage2D{nullptr};
     PfnDeleteTextures DeleteTextures{nullptr};
+
+    PfnGenQueries GenQueries{nullptr};
+    PfnDeleteQueries DeleteQueries{nullptr};
+    PfnBeginQuery BeginQuery{nullptr};
+    PfnEndQuery EndQuery{nullptr};
+    PfnGetQueryObjectiv GetQueryObjectiv{nullptr};
+    PfnGetQueryObjectui64v GetQueryObjectui64v{nullptr};
 
     template <typename Fn>
     bool LoadFn(GlProcAddressFn procLoader, const char* name, Fn& out) noexcept {
@@ -418,6 +437,14 @@ struct GlEs3Api {
         ok = LoadFn(procLoader, "glTexImage2D", TexImage2D) && ok;
         ok = LoadFn(procLoader, "glTexSubImage2D", TexSubImage2D) && ok;
         ok = LoadFn(procLoader, "glDeleteTextures", DeleteTextures) && ok;
+
+        // Optional OpenGL 3.3+ asynchronous GPU timer queries (GL_TIME_ELAPSED)
+        (void)LoadFn(procLoader, "glGenQueries", GenQueries);
+        (void)LoadFn(procLoader, "glDeleteQueries", DeleteQueries);
+        (void)LoadFn(procLoader, "glBeginQuery", BeginQuery);
+        (void)LoadFn(procLoader, "glEndQuery", EndQuery);
+        (void)LoadFn(procLoader, "glGetQueryObjectiv", GetQueryObjectiv);
+        (void)LoadFn(procLoader, "glGetQueryObjectui64v", GetQueryObjectui64v);
         return ok;
 #endif
     }

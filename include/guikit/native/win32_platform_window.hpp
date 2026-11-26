@@ -29,6 +29,7 @@ public:
 
     bool MakeContextCurrent() noexcept override;
     void SwapBuffers() noexcept override;
+    void WaitForVBlank() noexcept override;
     [[nodiscard]] GlProcAddressFn GetGlProcAddressFn() const noexcept override;
 
     [[nodiscard]] keel::i32 GetFramebufferWidth() const noexcept override;
