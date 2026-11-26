@@ -82,6 +82,14 @@ public:
     ) override;
     [[nodiscard]] bool SupportsBackdropBlur() const noexcept override;
     void DrawGlassRect(Rect rect, keel::f32 radius, const GlassParams& params) override;
+    void DrawGradientRoundRect(
+        Rect rect,
+        keel::f32 radius,
+        const Gradient& fill,
+        Color stroke = Color(0, 0, 0, 0),
+        keel::f32 strokeWidth = 0.0f,
+        const Gradient* strokeGradient = nullptr
+    ) override;
 
     Vec2 MeasureText(keel::StringRef text, keel::f32 fontSize) override;
     Vec2 MeasureTextStyled(keel::StringRef text, keel::f32 fontSize, FontStyle style) override;

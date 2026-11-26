@@ -611,7 +611,11 @@ uniform sampler2D u_SceneTex;
 uniform sampler2D u_BlurTex;
 uniform vec2 u_Viewport;
 uniform vec4 u_Tint;
+uniform vec4 u_TintEnd;
+uniform vec4 u_TintAxis; // xy=startUV, zw=deltaUV
+uniform float u_TintRadial;
 uniform vec4 u_BorderColor;
+uniform vec4 u_BorderColorEnd;
 uniform vec4 u_RimColor;
 uniform vec4 u_GlassA; // x=radiusPx, y=borderWidthPx, z=refraction, w=dispersion
 uniform vec4 u_GlassB; // x=rimLight, y=saturation, z=frost, w=dpiScale
@@ -709,8 +713,16 @@ void main() {
     float luma = dot(backdrop, vec3(0.2126, 0.7152, 0.0722));
     backdrop = clamp(mix(vec3(luma), backdrop, u_GlassB.y), 0.0, 1.0);
 
-    // Apply palette-derived translucent surface tint
-    vec3 col = mix(backdrop, u_Tint.rgb, u_Tint.a);
+    // Rect-normalized UV [0..1] for optional directional or radial gradient tint & border
+    vec2 rectUv = (v_LocalPx + v_HalfSize) / max(v_HalfSize * 2.0, vec2(1.0));
+    vec2 axisD = u_TintAxis.zw;
+    float linearT = clamp(dot(rectUv - u_TintAxis.xy, axisD) / max(dot(axisD, axisD), 1e-5), 0.0, 1.0);
+    float radialT = clamp(length((rectUv - vec2(0.5)) * 2.0), 0.0, 1.0);
+    float gradT = (u_TintRadial > 0.5) ? radialT : linearT;
+
+    // Apply palette-derived translucent surface tint (flat, directional, or radial gradient)
+    vec4 effTint = (u_TintEnd.a > 0.001) ? mix(u_Tint, u_TintEnd, gradT) : u_Tint;
+    vec3 col = mix(backdrop, effTint.rgb, effTint.a);
 
     // Directional top-left specular rim highlight + soft bottom-right bounce
     vec2 lightDir = normalize(vec2(-0.65, -0.76));
@@ -721,15 +733,136 @@ void main() {
     float specAmt = clamp((topLeftSpec + botRightBounce) * u_GlassB.x * 0.72, 0.0, 0.85);
     col = mix(col, u_RimColor.rgb, specAmt);
 
-    // Crisp hairline glass border
+    // Crisp hairline glass border (flat or directional luminous gradient)
     float bw = u_GlassA.y;
-    if (bw > 0.0 && u_BorderColor.a > 0.0) {
+    vec4 effBorder = (u_BorderColorEnd.a > 0.001) ? mix(u_BorderColor, u_BorderColorEnd, linearT) : u_BorderColor;
+    if (bw > 0.0 && effBorder.a > 0.0) {
         float innerD = d + bw;
         float borderCov = clamp(fillCov - (1.0 - smoothstep(-0.65, 0.65, innerD)), 0.0, 1.0);
-        col = mix(col, u_BorderColor.rgb, borderCov * u_BorderColor.a);
+        col = mix(col, effBorder.rgb, borderCov * effBorder.a);
     }
 
     FragColor = vec4(col, outAlpha);
+}
+)GLSL";
+
+static constexpr const char* kGradFragBody = R"GLSL(
+uniform vec4 u_FillStops[4];
+uniform vec4 u_FillOffsets; // x=o0, y=o1, z=o2, w=o3
+uniform vec4 u_FillGeom;    // xy=startUV, zw=endUV (or x=radius for radial)
+uniform vec4 u_FillMeta;    // x=stopCount, y=isRadial, z=radiusPx, w=strokeWidthPx
+uniform vec4 u_StrokeStops[4];
+uniform vec4 u_StrokeOffsets;
+uniform vec4 u_StrokeGeom;
+uniform vec4 u_StrokeMeta;  // x=stopCount (0=solid u_StrokeStops[0]), y=isRadial, z=hasFill, w=hasStroke
+uniform int u_ClipCount;
+uniform vec4 u_ClipRects[4];
+uniform vec4 u_ClipRadii;
+
+in vec2 v_LocalPx;
+in vec2 v_HalfSize;
+in vec2 v_ScreenPx;
+
+out vec4 FragColor;
+
+float sdRoundedBox(vec2 p, vec2 b, float r) {
+    float rr = min(r, min(b.x, b.y));
+    vec2 q = abs(p) - b + vec2(rr);
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;
+}
+
+float clipRadiusAt(int idx) {
+    if (idx == 0) return u_ClipRadii.x;
+    if (idx == 1) return u_ClipRadii.y;
+    if (idx == 2) return u_ClipRadii.z;
+    return u_ClipRadii.w;
+}
+
+float computeRoundedClipCov() {
+    float cov = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= u_ClipCount) break;
+        float d = sdRoundedBox(v_ScreenPx - u_ClipRects[i].xy, u_ClipRects[i].zw, clipRadiusAt(i));
+        cov = min(cov, 1.0 - smoothstep(-0.65, 0.65, d));
+    }
+    return cov;
+}
+
+float evalGradT(vec2 uv, vec4 geom, float isRadial) {
+    if (isRadial > 0.5) {
+        vec2 diff = (uv - geom.xy) * 2.0;
+        float rad = max(geom.z, 0.05);
+        return clamp(length(diff) / rad, 0.0, 1.0);
+    }
+    vec2 d = geom.zw - geom.xy;
+    return clamp(dot(uv - geom.xy, d) / max(dot(d, d), 1e-5), 0.0, 1.0);
+}
+
+vec4 evalStops(float t, vec4 s0, vec4 s1, vec4 s2, vec4 s3, vec4 off, float count) {
+    if (count < 1.5) return s0;
+    vec4 col = s0;
+    if (t <= off.x) return s0;
+    if (t <= off.y || count < 2.5) {
+        float u = clamp((t - off.x) / max(off.y - off.x, 1e-5), 0.0, 1.0);
+        return mix(s0, s1, u);
+    }
+    if (t <= off.z || count < 3.5) {
+        float u = clamp((t - off.y) / max(off.z - off.y, 1e-5), 0.0, 1.0);
+        return mix(s1, s2, u);
+    }
+    float u = clamp((t - off.z) / max(off.w - off.z, 1e-5), 0.0, 1.0);
+    col = mix(s2, s3, u);
+    return col;
+}
+
+float interleavedNoise(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+void main() {
+    float clipCov = 1.0;
+    if (u_ClipCount > 0) {
+        clipCov = computeRoundedClipCov();
+        if (clipCov <= 0.001) discard;
+    }
+
+    float r = min(u_FillMeta.z, min(v_HalfSize.x, v_HalfSize.y));
+    float d = sdRoundedBox(v_LocalPx, v_HalfSize, r);
+    float outerCov = 1.0 - smoothstep(-0.65, 0.65, d);
+    if (outerCov <= 0.001) discard;
+
+    vec2 uv = (v_LocalPx + v_HalfSize) / max(v_HalfSize * 2.0, vec2(1.0));
+    vec4 fillCol = vec4(0.0);
+    if (u_StrokeMeta.z > 0.5) {
+        float ft = evalGradT(uv, u_FillGeom, u_FillMeta.y);
+        fillCol = evalStops(ft, u_FillStops[0], u_FillStops[1], u_FillStops[2], u_FillStops[3], u_FillOffsets, u_FillMeta.x);
+    }
+
+    vec4 outCol = vec4(fillCol.rgb, fillCol.a * outerCov);
+    float bw = u_FillMeta.w;
+    if (bw > 0.0 && u_StrokeMeta.w > 0.5) {
+        float innerCov = 1.0 - smoothstep(-0.65, 0.65, d + bw);
+        float borderCov = clamp(outerCov - innerCov, 0.0, 1.0);
+        vec4 strokeCol = u_StrokeStops[0];
+        if (u_StrokeMeta.x > 1.5) {
+            float st = evalGradT(uv, u_StrokeGeom, u_StrokeMeta.y);
+            strokeCol = evalStops(st, u_StrokeStops[0], u_StrokeStops[1], u_StrokeStops[2], u_StrokeStops[3], u_StrokeOffsets, u_StrokeMeta.x);
+        }
+        // Standard premultiplied-alpha Porter-Duff "stroke over fill"
+        vec4 src = vec4(strokeCol.rgb * (strokeCol.a * borderCov), strokeCol.a * borderCov);
+        vec4 dst = vec4(fillCol.rgb * (fillCol.a * outerCov), fillCol.a * outerCov);
+        float compA = src.a + dst.a * (1.0 - src.a);
+        vec3 compRgb = (compA > 1e-4) ? ((src.rgb + dst.rgb * (1.0 - src.a)) / compA) : vec3(0.0);
+        outCol = vec4(compRgb, compA);
+    }
+
+    outCol.a *= clipCov;
+    if (outCol.a <= 0.001) discard;
+
+    // Subtle triangular-PDF dither (+/- 0.5/255) eliminates 8-bit banding on dark studio cards
+    float dither = (interleavedNoise(v_ScreenPx) - 0.5) / 255.0;
+    outCol.rgb = clamp(outCol.rgb + vec3(dither), 0.0, 1.0);
+    FragColor = outCol;
 }
 )GLSL";
 
@@ -1114,13 +1247,24 @@ struct GlEs3Canvas::Impl {
         }
     };
 
-    enum class BatchKind : keel::u8 { Rects = 0, Quads = 1, Tris = 2, Glass = 3 };
+    enum class BatchKind : keel::u8 { Rects = 0, Quads = 1, Tris = 2, Glass = 3, Gradients = 4 };
 
     struct GlassDrawCmd {
         Rect rectPx{};
         keel::f32 radiusPx{0.0f};
         GlassParams params{};
         keel::f32 effScale{1.0f};
+    };
+
+    struct GradientDrawCmd {
+        Rect rectPx{};
+        keel::f32 radiusPx{0.0f};
+        keel::f32 strokeWidthPx{0.0f};
+        Gradient fill{};
+        Color strokeColor{0, 0, 0, 0};
+        Gradient strokeGradient{};
+        bool hasFill{false};
+        bool hasStrokeGradient{false};
     };
 
     struct DrawBatch {
@@ -1181,13 +1325,34 @@ struct GlEs3Canvas::Impl {
     GLint glassLocSceneTex{-1};
     GLint glassLocBlurTex{-1};
     GLint glassLocTint{-1};
+    GLint glassLocTintEnd{-1};
+    GLint glassLocTintAxis{-1};
+    GLint glassLocTintRadial{-1};
     GLint glassLocBorderColor{-1};
+    GLint glassLocBorderColorEnd{-1};
     GLint glassLocRimColor{-1};
     GLint glassLocA{-1};
     GLint glassLocB{-1};
     GLint glassLocClipCount{-1};
     GLint glassLocClipRects{-1};
     GLint glassLocClipRadii{-1};
+
+    // Lazy single-pass GPU gradient rounded-rect program (zero FBO, zero cost when unused)
+    bool gradInitFailed{false};
+    GLuint gradProg{0};
+    GLint gradLocViewport{-1};
+    GLint gradLocRect{-1};
+    GLint gradLocFillStops{-1};
+    GLint gradLocFillOffsets{-1};
+    GLint gradLocFillGeom{-1};
+    GLint gradLocFillMeta{-1};
+    GLint gradLocStrokeStops{-1};
+    GLint gradLocStrokeOffsets{-1};
+    GLint gradLocStrokeGeom{-1};
+    GLint gradLocStrokeMeta{-1};
+    GLint gradLocClipCount{-1};
+    GLint gradLocClipRects{-1};
+    GLint gradLocClipRadii{-1};
 
     static constexpr keel::usize kTimerQueryCount = 4u;
     bool timerQueriesSupported{false};
@@ -1202,6 +1367,7 @@ struct GlEs3Canvas::Impl {
     keel::Array<QuadInstance> frameQuads;
     keel::Array<TriVertex> frameTris;
     keel::Array<GlassDrawCmd> frameGlass;
+    keel::Array<GradientDrawCmd> frameGrads;
     keel::Array<DrawBatch> drawBatches;
     keel::Array<RoundedClipSnapshot> roundedClipTable;
     ScissorState curScissor{};
@@ -1504,8 +1670,39 @@ struct GlEs3Canvas::Impl {
             if (kawaseUpProg != 0u) gl.DeleteProgram(kawaseUpProg);
             if (blitProg != 0u) gl.DeleteProgram(blitProg);
             if (glassProg != 0u) gl.DeleteProgram(glassProg);
+            if (gradProg != 0u) gl.DeleteProgram(gradProg);
         }
-        emptyVao = kawaseDownProg = kawaseUpProg = blitProg = glassProg = 0u;
+        emptyVao = kawaseDownProg = kawaseUpProg = blitProg = glassProg = gradProg = 0u;
+    }
+
+    [[nodiscard]] bool EnsureGradProgram() noexcept {
+        if (!initialized || gradInitFailed) return false;
+        if (emptyVao == 0u) {
+            gl.GenVertexArrays(1, &emptyVao);
+        }
+        if (gradProg != 0u) return true;
+        gradProg = LinkProgram(gl, isDesktopGl, kGlassVertBody, kGradFragBody);
+        if (gradProg == 0u) {
+            gradInitFailed = true;
+            return false;
+        }
+        gradLocViewport = gl.GetUniformLocation(gradProg, "u_Viewport");
+        gradLocRect = gl.GetUniformLocation(gradProg, "u_Rect");
+        gradLocFillStops = gl.GetUniformLocation(gradProg, "u_FillStops[0]");
+        if (gradLocFillStops < 0) gradLocFillStops = gl.GetUniformLocation(gradProg, "u_FillStops");
+        gradLocFillOffsets = gl.GetUniformLocation(gradProg, "u_FillOffsets");
+        gradLocFillGeom = gl.GetUniformLocation(gradProg, "u_FillGeom");
+        gradLocFillMeta = gl.GetUniformLocation(gradProg, "u_FillMeta");
+        gradLocStrokeStops = gl.GetUniformLocation(gradProg, "u_StrokeStops[0]");
+        if (gradLocStrokeStops < 0) gradLocStrokeStops = gl.GetUniformLocation(gradProg, "u_StrokeStops");
+        gradLocStrokeOffsets = gl.GetUniformLocation(gradProg, "u_StrokeOffsets");
+        gradLocStrokeGeom = gl.GetUniformLocation(gradProg, "u_StrokeGeom");
+        gradLocStrokeMeta = gl.GetUniformLocation(gradProg, "u_StrokeMeta");
+        gradLocClipCount = gl.GetUniformLocation(gradProg, "u_ClipCount");
+        gradLocClipRects = gl.GetUniformLocation(gradProg, "u_ClipRects[0]");
+        if (gradLocClipRects < 0) gradLocClipRects = gl.GetUniformLocation(gradProg, "u_ClipRects");
+        gradLocClipRadii = gl.GetUniformLocation(gradProg, "u_ClipRadii");
+        return true;
     }
 
     [[nodiscard]] bool CreateColorFbo(GLuint& outFbo, GLuint& outTex, keel::u32 w, keel::u32 h, GLuint* outStencilRbo = nullptr) noexcept {
@@ -1578,7 +1775,11 @@ struct GlEs3Canvas::Impl {
             glassLocSceneTex = gl.GetUniformLocation(glassProg, "u_SceneTex");
             glassLocBlurTex = gl.GetUniformLocation(glassProg, "u_BlurTex");
             glassLocTint = gl.GetUniformLocation(glassProg, "u_Tint");
+            glassLocTintEnd = gl.GetUniformLocation(glassProg, "u_TintEnd");
+            glassLocTintAxis = gl.GetUniformLocation(glassProg, "u_TintAxis");
+            glassLocTintRadial = gl.GetUniformLocation(glassProg, "u_TintRadial");
             glassLocBorderColor = gl.GetUniformLocation(glassProg, "u_BorderColor");
+            glassLocBorderColorEnd = gl.GetUniformLocation(glassProg, "u_BorderColorEnd");
             glassLocRimColor = gl.GetUniformLocation(glassProg, "u_RimColor");
             glassLocA = gl.GetUniformLocation(glassProg, "u_GlassA");
             glassLocB = gl.GetUniformLocation(glassProg, "u_GlassB");
@@ -2258,6 +2459,7 @@ struct GlEs3Canvas::Impl {
                     quadClipIdx = 0xFFFFu;
                     triClipIdx = 0xFFFFu;
                     glassClipIdx = 0xFFFFu;
+                    gradClipIdx = 0xFFFFu;
                     quadBaseBytes = keel::Limits<keel::usize>::kMax;
                 }
 
@@ -2290,9 +2492,26 @@ struct GlEs3Canvas::Impl {
                 const GlassParams& gp = cmd.params;
                 impl.gl.Uniform4f(impl.glassLocRect, cmd.rectPx.x, cmd.rectPx.y, cmd.rectPx.w, cmd.rectPx.h);
                 impl.gl.Uniform4f(impl.glassLocTint, gp.tint.r / 255.0f, gp.tint.g / 255.0f, gp.tint.b / 255.0f, gp.tint.a / 255.0f);
+                if (impl.glassLocTintEnd >= 0) {
+                    impl.gl.Uniform4f(impl.glassLocTintEnd, gp.tintEnd.r / 255.0f, gp.tintEnd.g / 255.0f, gp.tintEnd.b / 255.0f, gp.tintEnd.a / 255.0f);
+                }
+                if (impl.glassLocTintAxis >= 0) {
+                    Vec2 p0{};
+                    Vec2 p1{};
+                    Gradient::EndpointsFromAngle(gp.tintAngleDeg, p0, p1);
+                    impl.gl.Uniform4f(impl.glassLocTintAxis, p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
+                }
+                if (impl.glassLocTintRadial >= 0) {
+                    impl.gl.Uniform1f(impl.glassLocTintRadial, gp.tintRadial ? 1.0f : 0.0f);
+                }
                 impl.gl.Uniform4f(impl.glassLocBorderColor, gp.borderColor.r / 255.0f, gp.borderColor.g / 255.0f, gp.borderColor.b / 255.0f, gp.borderColor.a / 255.0f);
+                if (impl.glassLocBorderColorEnd >= 0) {
+                    impl.gl.Uniform4f(impl.glassLocBorderColorEnd, gp.borderColorEnd.r / 255.0f, gp.borderColorEnd.g / 255.0f, gp.borderColorEnd.b / 255.0f, gp.borderColorEnd.a / 255.0f);
+                }
                 impl.gl.Uniform4f(impl.glassLocRimColor, gp.rimColor.r / 255.0f, gp.rimColor.g / 255.0f, gp.rimColor.b / 255.0f, gp.rimColor.a / 255.0f);
-                const keel::f32 bwPx = (gp.borderWidth > 0.0f && gp.borderColor.a > 0u) ? keel::max(1.0f, gp.borderWidth * cmd.effScale) : 0.0f;
+                const keel::f32 bwPx = (gp.borderWidth > 0.0f && (gp.borderColor.a > 0u || gp.borderColorEnd.a > 0u))
+                    ? keel::max(1.0f, gp.borderWidth * cmd.effScale)
+                    : 0.0f;
                 impl.gl.Uniform4f(impl.glassLocA, cmd.radiusPx, bwPx, gp.refraction, gp.dispersion);
                 impl.gl.Uniform4f(impl.glassLocB, gp.rimLight, gp.saturation, gp.frost, cmd.effScale);
 
@@ -2304,6 +2523,98 @@ struct GlEs3Canvas::Impl {
                 impl.gl.ActiveTexture(kGlTexture1);
                 impl.gl.BindTexture(kGlTexture2D, 0u);
                 impl.gl.ActiveTexture(kGlTexture0);
+            }
+
+            keel::u16 gradClipIdx{0xFFFFu};
+
+            // TODO(gl_es3_canvas): Upgrade GradientDrawCmd replay from per-rect uniform draws
+            // to instanced VBO batching if profiling ever shows hundreds of gradient rects per frame
+            // (e.g. dense gradient table cells on WebGL 2.0 / embedded GPUs).
+            void ReplayGradient(const DrawBatch& b) noexcept {
+                if (b.first >= impl.frameGrads.size() || !impl.EnsureGradProgram()) {
+                    return;
+                }
+                const GradientDrawCmd& cmd = impl.frameGrads[b.first];
+                SetBlend(false, 0u);
+                if (prog != impl.gradProg) {
+                    impl.gl.UseProgram(impl.gradProg);
+                    impl.gl.Uniform2f(impl.gradLocViewport, vpW, vpH);
+                    prog = impl.gradProg;
+                }
+                if (b.roundedClipIdx != gradClipIdx) {
+                    const keel::usize idx = (b.roundedClipIdx < impl.roundedClipTable.size()) ? b.roundedClipIdx : 0u;
+                    impl.UploadRoundedClipSnapshot(
+                        impl.roundedClipTable[idx],
+                        impl.gradLocClipCount,
+                        impl.gradLocClipRects,
+                        impl.gradLocClipRadii
+                    );
+                    gradClipIdx = b.roundedClipIdx;
+                }
+
+                auto packStops = [](const Gradient& g, keel::f32 outColors[16], keel::f32 outOffsets[4]) noexcept {
+                    const keel::u8 n = (g.stopCount > 4u) ? 4u : g.stopCount;
+                    for (keel::usize i = 0u; i < 4u; ++i) {
+                        const GradientStop& s = (i < n) ? g.stops[i] : g.stops[(n > 0u) ? (n - 1u) : 0u];
+                        outColors[i * 4u + 0u] = s.color.r / 255.0f;
+                        outColors[i * 4u + 1u] = s.color.g / 255.0f;
+                        outColors[i * 4u + 2u] = s.color.b / 255.0f;
+                        outColors[i * 4u + 3u] = s.color.a / 255.0f;
+                        outOffsets[i] = s.offset;
+                    }
+                };
+
+                keel::f32 fCols[16]{};
+                keel::f32 fOff[4]{0.0f, 1.0f, 1.0f, 1.0f};
+                if (cmd.hasFill) {
+                    packStops(cmd.fill, fCols, fOff);
+                }
+                impl.gl.Uniform4f(impl.gradLocRect, cmd.rectPx.x, cmd.rectPx.y, cmd.rectPx.w, cmd.rectPx.h);
+                impl.gl.Uniform4fv(impl.gradLocFillStops, 4, fCols);
+                impl.gl.Uniform4f(impl.gradLocFillOffsets, fOff[0], fOff[1], fOff[2], fOff[3]);
+                impl.gl.Uniform4f(impl.gradLocFillGeom, cmd.fill.start.x, cmd.fill.start.y, cmd.fill.end.x, cmd.fill.end.y);
+                impl.gl.Uniform4f(
+                    impl.gradLocFillMeta,
+                    keel::as<keel::f32>(cmd.fill.stopCount),
+                    (cmd.fill.kind == GradientKind::Radial) ? 1.0f : 0.0f,
+                    cmd.radiusPx,
+                    cmd.strokeWidthPx
+                );
+
+                keel::f32 sCols[16]{};
+                keel::f32 sOff[4]{0.0f, 1.0f, 1.0f, 1.0f};
+                const bool hasStroke = (cmd.strokeWidthPx > 0.0f) &&
+                    (cmd.hasStrokeGradient || cmd.strokeColor.a > 0u);
+                if (cmd.hasStrokeGradient) {
+                    packStops(cmd.strokeGradient, sCols, sOff);
+                } else {
+                    sCols[0] = cmd.strokeColor.r / 255.0f;
+                    sCols[1] = cmd.strokeColor.g / 255.0f;
+                    sCols[2] = cmd.strokeColor.b / 255.0f;
+                    sCols[3] = cmd.strokeColor.a / 255.0f;
+                }
+                impl.gl.Uniform4fv(impl.gradLocStrokeStops, 4, sCols);
+                impl.gl.Uniform4f(impl.gradLocStrokeOffsets, sOff[0], sOff[1], sOff[2], sOff[3]);
+                impl.gl.Uniform4f(
+                    impl.gradLocStrokeGeom,
+                    cmd.strokeGradient.start.x,
+                    cmd.strokeGradient.start.y,
+                    cmd.strokeGradient.end.x,
+                    cmd.strokeGradient.end.y
+                );
+                impl.gl.Uniform4f(
+                    impl.gradLocStrokeMeta,
+                    cmd.hasStrokeGradient ? keel::as<keel::f32>(cmd.strokeGradient.stopCount) : 0.0f,
+                    (cmd.hasStrokeGradient && cmd.strokeGradient.kind == GradientKind::Radial) ? 1.0f : 0.0f,
+                    cmd.hasFill ? 1.0f : 0.0f,
+                    hasStroke ? 1.0f : 0.0f
+                );
+
+                if (vao != impl.emptyVao) {
+                    impl.gl.BindVertexArray(impl.emptyVao);
+                    vao = impl.emptyVao;
+                }
+                impl.gl.DrawArrays(kGlTriangles, 0, 6);
             }
         } state{*this, keel::as<keel::f32>(fbWidth), keel::as<keel::f32>(fbHeight)};
 
@@ -2319,6 +2630,8 @@ struct GlEs3Canvas::Impl {
                 state.ReplayRects(b);
             } else if (b.kind == BatchKind::Quads) {
                 state.ReplayQuads(b);
+            } else if (b.kind == BatchKind::Gradients) {
+                state.ReplayGradient(b);
             } else {
                 state.ReplayTris(b);
             }
@@ -2329,6 +2642,7 @@ struct GlEs3Canvas::Impl {
         frameQuads.clear();
         frameTris.clear();
         frameGlass.clear();
+        frameGrads.clear();
         drawBatches.clear();
         roundedClipTable.clear();
         roundedClipTable.push_back(RoundedClipSnapshot{});
@@ -2830,6 +3144,7 @@ void GlEs3Canvas::Begin(keel::u32 width, keel::u32 height, keel::f32 scale) {
     m_impl->frameQuads.clear();
     m_impl->frameTris.clear();
     m_impl->frameGlass.clear();
+    m_impl->frameGrads.clear();
     m_impl->drawBatches.clear();
     m_impl->roundedClipTable.clear();
     m_impl->roundedClipTable.push_back(Impl::RoundedClipSnapshot{});
@@ -3090,6 +3405,60 @@ void GlEs3Canvas::DrawGlassRect(Rect rect, keel::f32 radius, const GlassParams& 
         .boundsPx = pr
     });
     m_impl->usedGlassThisFrame = true;
+}
+
+void GlEs3Canvas::DrawGradientRoundRect(
+    Rect rect,
+    keel::f32 radius,
+    const Gradient& fill,
+    Color stroke,
+    keel::f32 strokeWidth,
+    const Gradient* strokeGradient
+) {
+    if (!m_impl || !m_impl->initialized || rect.w <= 0.0f || rect.h <= 0.0f) return;
+    const bool hasFill = fill.HasVisibleColor();
+    const bool hasStrokeGrad = (strokeGradient != nullptr && strokeGradient->HasVisibleColor());
+    const bool hasStroke = (strokeWidth > 0.0f) && (stroke.a > 0u || hasStrokeGrad);
+    if (!hasFill && !hasStroke) return;
+
+    if (m_impl->gradInitFailed) {
+        ICanvas::DrawGradientRoundRect(rect, radius, fill, stroke, strokeWidth, strokeGradient);
+        return;
+    }
+
+    const keel::f32 eff = m_impl->EffScale();
+    const Rect pr = m_impl->PxRect(rect);
+    if (m_impl->IsClippedOut(pr, 2.0f)) return;
+
+    const keel::f32 rPx = keel::clamp(radius * eff, 0.0f, keel::min(pr.w, pr.h) * 0.5f);
+    const keel::f32 swPx = hasStroke ? keel::max(1.0f, strokeWidth * eff) : 0.0f;
+    const keel::u16 clipIdx = m_impl->EffectiveRoundedClipIdx(
+        Rect(pr.x - 2.0f, pr.y - 2.0f, pr.w + 4.0f, pr.h + 4.0f)
+    );
+    const keel::u32 gIdx = keel::as<keel::u32>(m_impl->frameGrads.size());
+    Impl::GradientDrawCmd cmd{};
+    cmd.rectPx = pr;
+    cmd.radiusPx = rPx;
+    cmd.strokeWidthPx = swPx;
+    cmd.fill = fill;
+    cmd.strokeColor = stroke;
+    if (hasStrokeGrad) {
+        cmd.strokeGradient = *strokeGradient;
+    }
+    cmd.hasFill = hasFill;
+    cmd.hasStrokeGradient = hasStrokeGrad;
+    m_impl->frameGrads.push_back(cmd);
+    m_impl->drawBatches.push_back(Impl::DrawBatch{
+        .kind = Impl::BatchKind::Gradients,
+        .first = gIdx,
+        .count = 1u,
+        .tex = 0u,
+        .isLcd = false,
+        .lcdRgbKey = 0u,
+        .scissor = m_impl->curScissor,
+        .roundedClipIdx = clipIdx,
+        .boundsPx = pr
+    });
 }
 
 Vec2 GlEs3Canvas::MeasureText(keel::StringRef text, keel::f32 fontSize) {
@@ -4002,6 +4371,9 @@ void GlEs3Canvas::TrimCaches() noexcept {
     }
     if (m_impl->frameGlass.empty() && m_impl->frameGlass.capacity() > 256u) {
         m_impl->frameGlass = {};
+    }
+    if (m_impl->frameGrads.empty() && m_impl->frameGrads.capacity() > 256u) {
+        m_impl->frameGrads = {};
     }
     if (m_impl->drawBatches.empty() && m_impl->drawBatches.capacity() > 512u) {
         m_impl->drawBatches = {};

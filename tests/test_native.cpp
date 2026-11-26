@@ -253,9 +253,9 @@ void main() {
                     .borderColor = Color(255, 255, 255, 72),
                     .rimColor = Color(255, 255, 255, 255)
                 });
-                // Second stacked glass overlay (glass-on-glass dirty-rect recapture)
+                // Second stacked glass overlay (glass-on-glass dirty-rect recapture) with gradient tint & border
                 glCanvas.DrawGlassRect(Rect(110.0f, 70.0f, 120.0f, 68.0f), 12.0f, GlassParams{
-                    .tint = Color(30, 41, 59, 176),
+                    .tint = Color(37, 99, 235, 176),
                     .blurRadius = 18.0f,
                     .refraction = 0.26f,
                     .dispersion = 0.14f,
@@ -263,23 +263,60 @@ void main() {
                     .saturation = 1.16f,
                     .frost = 0.86f,
                     .borderWidth = 1.0f,
-                    .borderColor = Color(255, 255, 255, 86),
-                    .rimColor = Color(255, 255, 255, 255)
+                    .borderColor = Color(255, 255, 255, 110),
+                    .rimColor = Color(255, 255, 255, 255),
+                    .tintEnd = Color(6, 182, 212, 176),
+                    .tintAngleDeg = 135.0f,
+                    .borderColorEnd = Color(56, 189, 248, 70),
+                    .tintRadial = (f == 1)
                 });
+                // Single-pass GPU Linear & Radial gradient rounded rects with gradient border
+                const Gradient linGrad = Gradient::Linear3(
+                    Color::Hex(0xF97316FF),
+                    Color::Hex(0xEC4899FF),
+                    Color::Hex(0x8B5CF6FF),
+                    135.0f
+                );
+                const Gradient bdrGrad = Gradient::Linear(Color(255, 255, 255, 180), Color(56, 189, 248, 80), 135.0f);
+                const Gradient radGrad = Gradient::Radial(Color::Hex(0x38BDF8FF), Color::Hex(0x1E3A8AFF));
+                glCanvas.DrawGradientRoundRect(Rect(220.0f, 150.0f, 140.0f, 44.0f), 10.0f, linGrad, Color::Transparent(), 1.5f, &bdrGrad);
+                glCanvas.DrawGradientRoundRect(Rect(220.0f, 205.0f, 140.0f, 44.0f), 10.0f, radGrad, Color(255, 255, 255, 90), 1.0f);
                 CHECK(glCanvas.SupportsBackdropBlur());
                 glCanvas.End();
                 nativeWin->SwapBuffers();
             }
-            // Verify full ChromeStyle::Glass immediate-mode UI frame + clean FBO eviction after switching back to non-glass frame
+            // Verify full ChromeStyle::Glass x Gradient, ChromeStyle::Luminous x Gradient, and non-glass fast path
             {
-                const UiTheme glassUiTheme = UiTheme::Build({.base = ThemePreset::Nord, .chrome = ChromeStyle::Glass});
+                const UiTheme glassUiTheme = UiTheme::Build({
+                    .base = ThemePreset::Nord,
+                    .chrome = ChromeStyle::Glass,
+                    .fillStyle = FillStyle::Gradient
+                });
                 ui.SetTheme(glassUiTheme);
                 keel::f32 sliderVal = 55.0f;
                 ui.BeginFrame({400.0f, 300.0f}, 1.0f);
                 if (auto card = guikit::Card(ui, {.gap = 8.0f, .padding = Padding::All(14.0f), .surface = SurfaceRole::Raised})) {
-                    guikit::Heading(ui, {.label = "Glass Chrome Smoke"});
+                    guikit::Heading(ui, {.label = "Glass x Gradient Smoke"});
                     (void)guikit::Button(ui, {.text = "Refract", .variant = UiVariant::Primary});
+                    (void)guikit::Button(ui, {
+                        .text = "Custom Grad",
+                        .background = StateColor::LinearGradient(Color::Hex(0x6366F1FF), Color::Hex(0x06B6D4FF), 135.0f)
+                    });
                     (void)guikit::Slider(ui, sliderVal, 0.0f, 100.0f);
+                }
+                ui.EndFrame(glCanvas);
+                nativeWin->SwapBuffers();
+
+                // Luminous x Gradient (single-pass GPU gradient surfaces + borders, zero FBO)
+                ui.SetTheme(UiTheme::Build({
+                    .base = ThemePreset::Dark,
+                    .chrome = ChromeStyle::Luminous,
+                    .fillStyle = FillStyle::Gradient
+                }));
+                ui.BeginFrame({400.0f, 300.0f}, 1.0f);
+                if (auto card = guikit::Card(ui, {.gap = 8.0f, .padding = Padding::All(14.0f), .surface = SurfaceRole::Raised})) {
+                    guikit::Heading(ui, {.label = "Luminous Gradient Smoke"});
+                    (void)guikit::Button(ui, {.text = "Deploy", .variant = UiVariant::Primary});
                 }
                 ui.EndFrame(glCanvas);
                 nativeWin->SwapBuffers();
