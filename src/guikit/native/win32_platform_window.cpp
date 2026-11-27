@@ -1776,6 +1776,9 @@ void Win32PlatformWindow::StartSystemMove() noexcept {
     }
     m_impl->capturedButtons = 0u;
     (void)::SendMessageW(m_impl->hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
+    if (m_impl->ui) {
+        m_impl->ui->ResetMouseButtonsAfterModalDialog();
+    }
 }
 
 void Win32PlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
@@ -1797,6 +1800,9 @@ void Win32PlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
     }
     m_impl->capturedButtons = 0u;
     (void)::SendMessageW(m_impl->hwnd, WM_SYSCOMMAND, SC_SIZE | wmsz, 0);
+    if (m_impl->ui) {
+        m_impl->ui->ResetMouseButtonsAfterModalDialog();
+    }
 }
 
 bool Win32PlatformWindow::SupportsFileDialogs() const noexcept {
