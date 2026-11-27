@@ -494,6 +494,7 @@ struct Win32PlatformWindow::Impl {
     PfnDwmFlush dwmFlush{nullptr};
     PfnDwmIsCompositionEnabled dwmIsCompositionEnabled{nullptr};
     PfnDwmExtendFrameIntoClientArea dwmExtendFrameIntoClientArea{nullptr};
+    PfnDwmSetWindowAttribute dwmSetWindowAttribute{nullptr};
 
     bool immProbed{false};
     keel::Optional<keel::DynLib> imm32Lib;
@@ -587,6 +588,7 @@ struct Win32PlatformWindow::Impl {
             dwmFlush = dwmLib->symbol<PfnDwmFlush>("DwmFlush");
             dwmIsCompositionEnabled = dwmLib->symbol<PfnDwmIsCompositionEnabled>("DwmIsCompositionEnabled");
             dwmExtendFrameIntoClientArea = dwmLib->symbol<PfnDwmExtendFrameIntoClientArea>("DwmExtendFrameIntoClientArea");
+            dwmSetWindowAttribute = dwmLib->symbol<PfnDwmSetWindowAttribute>("DwmSetWindowAttribute");
         }
     }
 
@@ -1737,6 +1739,36 @@ bool Win32PlatformWindow::SetCustomTitleBar(bool enabled) noexcept {
     return true;
 }
 
+void Win32PlatformWindow::SetWindowCornerStyle(WindowCornerStyle style) noexcept {
+    if (!m_impl || !m_impl->hwnd) return;
+    m_impl->EnsureDwmLoaded();
+    if (!m_impl->dwmSetWindowAttribute) return;
+    // DWMWA_WINDOW_CORNER_PREFERENCE = 33 (Windows 11+; safely ignored on Win10)
+    DWORD pref = 0u; // DWMWCP_DEFAULT
+    switch (style) {
+        case WindowCornerStyle::Square:     pref = 1u; break; // DWMWCP_DONOTROUND
+        case WindowCornerStyle::Round:      pref = 2u; break; // DWMWCP_ROUND
+        case WindowCornerStyle::RoundSmall: pref = 3u; break; // DWMWCP_ROUNDSMALL
+        case WindowCornerStyle::Auto:
+        default:                            pref = 0u; break; // DWMWCP_DEFAULT
+    }
+    (void)m_impl->dwmSetWindowAttribute(m_impl->hwnd, 33u, &pref, sizeof(pref));
+}
+
+void Win32PlatformWindow::SetWindowBorderColor(keel::Optional<Color> color) noexcept {
+    if (!m_impl || !m_impl->hwnd) return;
+    m_impl->EnsureDwmLoaded();
+    if (!m_impl->dwmSetWindowAttribute) return;
+    // DWMWA_BORDER_COLOR = 34 (Windows 11+; COLORREF 0x00BBGGRR, 0xFFFFFFFF = DWMWA_COLOR_DEFAULT)
+    DWORD ref = 0xFFFFFFFFu;
+    if (color.has_value() && color->a > 0u) {
+        ref = keel::as<DWORD>(color->r) |
+              (keel::as<DWORD>(color->g) << 8u) |
+              (keel::as<DWORD>(color->b) << 16u);
+    }
+    (void)m_impl->dwmSetWindowAttribute(m_impl->hwnd, 34u, &ref, sizeof(ref));
+}
+
 void Win32PlatformWindow::StartSystemMove() noexcept {
     if (!m_impl || !m_impl->hwnd) return;
     if (::GetCapture() == m_impl->hwnd) {
@@ -2009,6 +2041,8 @@ bool Win32PlatformWindow::IsFocused() const noexcept { return true; }
 bool Win32PlatformWindow::SupportsCustomTitleBar() const noexcept { return false; }
 bool Win32PlatformWindow::IsCustomTitleBar() const noexcept { return false; }
 bool Win32PlatformWindow::SetCustomTitleBar(bool) noexcept { return false; }
+void Win32PlatformWindow::SetWindowCornerStyle(WindowCornerStyle) noexcept {}
+void Win32PlatformWindow::SetWindowBorderColor(keel::Optional<Color>) noexcept {}
 void Win32PlatformWindow::StartSystemMove() noexcept {}
 void Win32PlatformWindow::StartSystemResize(WindowHitRegion) noexcept {}
 bool Win32PlatformWindow::SupportsFileDialogs() const noexcept { return false; }
