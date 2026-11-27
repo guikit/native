@@ -17,9 +17,13 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <imm.h>
 #ifdef IsMinimized
 #undef IsMinimized
+#endif
+#ifdef IsMaximized
+#undef IsMaximized
 #endif
 #ifdef DrawText
 #undef DrawText
@@ -79,6 +83,13 @@ using PfnSetProcessDPIAware = BOOL(WINAPI*)();
 using PfnGetDpiForWindow = UINT(WINAPI*)(HWND);
 using PfnAdjustWindowRectExForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
 using PfnDwmSetWindowAttribute = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+struct Win32DwmMargins {
+    keel::i32 cxLeftWidth;
+    keel::i32 cxRightWidth;
+    keel::i32 cyTopHeight;
+    keel::i32 cyBottomHeight;
+};
+using PfnDwmExtendFrameIntoClientArea = HRESULT(WINAPI*)(HWND, const Win32DwmMargins*);
 using PfnDwmFlush = HRESULT(WINAPI*)();
 using PfnDwmIsCompositionEnabled = HRESULT(WINAPI*)(BOOL*);
 using PfnImmGetContext = HIMC(WINAPI*)(HWND);
@@ -482,6 +493,7 @@ struct Win32PlatformWindow::Impl {
     keel::Optional<keel::DynLib> dwmLib;
     PfnDwmFlush dwmFlush{nullptr};
     PfnDwmIsCompositionEnabled dwmIsCompositionEnabled{nullptr};
+    PfnDwmExtendFrameIntoClientArea dwmExtendFrameIntoClientArea{nullptr};
 
     bool immProbed{false};
     keel::Optional<keel::DynLib> imm32Lib;
@@ -504,7 +516,12 @@ struct Win32PlatformWindow::Impl {
     keel::f32 pixelsPerMm{96.0f / 25.4f};
     bool highDpi{true};
     bool vsync{true};
+    bool resizable{true};
+    bool customTitleBar{false};
+    bool trackingNcLeave{false};
     bool fullscreen{false};
+    bool maximized{false};
+    bool focused{true};
     bool dwmPacingActive{false};
     bool minimized{false};
     bool inSizeMove{false};
@@ -569,6 +586,7 @@ struct Win32PlatformWindow::Impl {
             dwmLib = keel::move(lib.value());
             dwmFlush = dwmLib->symbol<PfnDwmFlush>("DwmFlush");
             dwmIsCompositionEnabled = dwmLib->symbol<PfnDwmIsCompositionEnabled>("DwmIsCompositionEnabled");
+            dwmExtendFrameIntoClientArea = dwmLib->symbol<PfnDwmExtendFrameIntoClientArea>("DwmExtendFrameIntoClientArea");
         }
     }
 
@@ -840,9 +858,75 @@ struct Win32PlatformWindow::Impl {
                 return 0;
             }
 
+            case WM_NCCALCSIZE: {
+                if (customTitleBar && !fullscreen && wParam == TRUE) {
+                    auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+                    if (params && ::IsZoomed(hWnd) != FALSE) {
+                        HMONITOR hmon = ::MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+                        MONITORINFO mi{};
+                        mi.cbSize = sizeof(mi);
+                        if (hmon && ::GetMonitorInfoW(hmon, &mi)) {
+                            params->rgrc[0] = mi.rcWork;
+                        }
+                    }
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_NCHITTEST: {
+                if (customTitleBar && !fullscreen) {
+                    POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                    ::ScreenToClient(hWnd, &pt);
+                    const keel::f32 safeDpi = (dpiScale > 0.1f) ? dpiScale : 1.0f;
+                    const Vec2 logicalPos{
+                        keel::as<keel::f32>(pt.x) / safeDpi,
+                        keel::as<keel::f32>(pt.y) / safeDpi
+                    };
+                    if (callbacks.onHitTest) {
+                        switch (callbacks.onHitTest(logicalPos)) {
+                            case WindowHitRegion::Caption:           return HTCAPTION;
+                            case WindowHitRegion::ResizeLeft:        return HTLEFT;
+                            case WindowHitRegion::ResizeRight:       return HTRIGHT;
+                            case WindowHitRegion::ResizeTop:         return HTTOP;
+                            case WindowHitRegion::ResizeBottom:      return HTBOTTOM;
+                            case WindowHitRegion::ResizeTopLeft:     return HTTOPLEFT;
+                            case WindowHitRegion::ResizeTopRight:    return HTTOPRIGHT;
+                            case WindowHitRegion::ResizeBottomLeft:  return HTBOTTOMLEFT;
+                            case WindowHitRegion::ResizeBottomRight: return HTBOTTOMRIGHT;
+                            case WindowHitRegion::MinimizeButton:
+                            case WindowHitRegion::MaximizeButton:
+                            case WindowHitRegion::CloseButton:
+                            case WindowHitRegion::Client:
+                            default:                                 return HTCLIENT;
+                        }
+                    }
+                    return HTCLIENT;
+                }
+                break;
+            }
+
+            case WM_ACTIVATE: {
+                const bool nowFocused = (LOWORD(wParam) != WA_INACTIVE);
+                if (nowFocused != focused) {
+                    focused = nowFocused;
+                    if (ui) {
+                        ui->InvalidateAll();
+                        ui->RequestRepaint(2);
+                    }
+                }
+                break;
+            }
+
             case WM_GETMINMAXINFO: {
                 auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
                 if (mmi && minWidth > 0 && minHeight > 0) {
+                    if (customTitleBar && !fullscreen) {
+                        const keel::f32 safeDpi = (dpiScale > 0.1f) ? dpiScale : 1.0f;
+                        mmi->ptMinTrackSize.x = keel::round_i32(keel::as<keel::f32>(minWidth) * safeDpi);
+                        mmi->ptMinTrackSize.y = keel::round_i32(keel::as<keel::f32>(minHeight) * safeDpi);
+                        return 0;
+                    }
                     RECT rc{0, 0, minWidth, minHeight};
                     const DWORD style = keel::as<DWORD>(::GetWindowLongPtrW(hWnd, GWL_STYLE));
                     const DWORD exStyle = keel::as<DWORD>(::GetWindowLongPtrW(hWnd, GWL_EXSTYLE));
@@ -895,9 +979,12 @@ struct Win32PlatformWindow::Impl {
                     minimized = true;
                     return 0;
                 }
+                const bool nowMax = (wParam == SIZE_MAXIMIZED);
+                const bool maxChanged = (nowMax != maximized);
+                maximized = nowMax;
                 const bool wasMin = minimized;
                 minimized = false;
-                if (nw != width || nh != height || wasMin) {
+                if (nw != width || nh != height || wasMin || maxChanged) {
                     width = nw;
                     height = nh;
                     if (callbacks.onResize) {
@@ -967,6 +1054,43 @@ struct Win32PlatformWindow::Impl {
                 }
                 capturedButtons = 0u;
                 return 0;
+
+            case WM_NCMOUSEMOVE: {
+                if (customTitleBar && ui) {
+                    POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                    ::ScreenToClient(hWnd, &pt);
+                    // Update mouse position so client widgets in HeaderBar clear hover cleanly when entering Caption/resize edges
+                    ui->OnMouseMove({keel::as<keel::f32>(pt.x), keel::as<keel::f32>(pt.y)});
+                    if (!trackingNcLeave) {
+                        TRACKMOUSEEVENT tme{};
+                        tme.cbSize = sizeof(tme);
+                        tme.dwFlags = TME_LEAVE | TME_NONCLIENT;
+                        tme.hwndTrack = hWnd;
+                        if (::TrackMouseEvent(&tme)) {
+                            trackingNcLeave = true;
+                        }
+                    }
+                }
+                break;
+            }
+
+            case WM_NCMOUSELEAVE: {
+                trackingNcLeave = false;
+                if (customTitleBar && ui) {
+                    POINT screenPt{};
+                    if (::GetCursorPos(&screenPt)) {
+                        RECT clientRc{};
+                        POINT clientPt = screenPt;
+                        ::ScreenToClient(hWnd, &clientPt);
+                        if (!::GetClientRect(hWnd, &clientRc) ||
+                            clientPt.x < clientRc.left || clientPt.x >= clientRc.right ||
+                            clientPt.y < clientRc.top || clientPt.y >= clientRc.bottom) {
+                            ui->OnMouseMove({-10000.0f, -10000.0f});
+                        }
+                    }
+                }
+                break;
+            }
 
             case WM_MOUSEMOVE:
                 if (ui) {
@@ -1218,10 +1342,14 @@ bool Win32PlatformWindow::Create(
     m_impl->callbacks = keel::move(callbacks);
     m_impl->highDpi = desc.highDpi;
     m_impl->vsync = desc.vsync;
+    m_impl->resizable = desc.resizable;
+    m_impl->customTitleBar = desc.customTitleBar && !desc.borderless && !desc.fullscreen;
     m_impl->minWidth = keel::max(desc.minWidth, 64);
     m_impl->minHeight = keel::max(desc.minHeight, 64);
     m_impl->closeRequested = false;
     m_impl->minimized = false;
+    m_impl->maximized = desc.maximized;
+    m_impl->focused = true;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1259,7 +1387,9 @@ bool Win32PlatformWindow::Create(
     }
 
     RECT rc{0, 0, reqW, reqH};
-    (void)::AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    if (!m_impl->customTitleBar) {
+        (void)::AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    }
     const keel::i32 outerW = rc.right - rc.left;
     const keel::i32 outerH = rc.bottom - rc.top;
 
@@ -1285,6 +1415,19 @@ bool Win32PlatformWindow::Create(
     }
 
     ApplyDwmDarkTitlebar(m_impl->hwnd);
+    if (m_impl->customTitleBar) {
+        m_impl->EnsureDwmLoaded();
+        if (m_impl->dwmExtendFrameIntoClientArea) {
+            const Win32DwmMargins margins{0, 0, 0, 1};
+            (void)m_impl->dwmExtendFrameIntoClientArea(m_impl->hwnd, &margins);
+        }
+        (void)::SetWindowPos(
+            m_impl->hwnd,
+            nullptr,
+            0, 0, 0, 0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+        );
+    }
     ::DragAcceptFiles(m_impl->hwnd, TRUE);
     if (const auto iconAsset = Assets::Find("assets/guikit-icon-inter850-1024.png"); iconAsset && !iconAsset->Empty()) {
         keel::u32 srcW = 0u;
@@ -1508,6 +1651,320 @@ void Win32PlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
     (void)::ShellExecuteW(nullptr, L"open", wideUrl.data(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+void Win32PlatformWindow::SetTitle(keel::StringRef title) noexcept {
+    if (!m_impl || !m_impl->hwnd) return;
+    const keel::Array<wchar_t> wideTitle = Utf8ToWideZ(title);
+    (void)::SetWindowTextW(m_impl->hwnd, wideTitle.data());
+}
+
+void Win32PlatformWindow::Minimize() noexcept {
+    if (m_impl && m_impl->hwnd) {
+        (void)::ShowWindow(m_impl->hwnd, SW_MINIMIZE);
+    }
+}
+
+void Win32PlatformWindow::Maximize() noexcept {
+    if (m_impl && m_impl->hwnd) {
+        (void)::ShowWindow(m_impl->hwnd, SW_MAXIMIZE);
+    }
+}
+
+void Win32PlatformWindow::Restore() noexcept {
+    if (m_impl && m_impl->hwnd) {
+        (void)::ShowWindow(m_impl->hwnd, SW_RESTORE);
+    }
+}
+
+void Win32PlatformWindow::RequestClose() noexcept {
+    if (m_impl && m_impl->hwnd) {
+        (void)::PostMessageW(m_impl->hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
+bool Win32PlatformWindow::IsMaximized() const noexcept {
+    if (!m_impl || !m_impl->hwnd) return false;
+    return ::IsZoomed(m_impl->hwnd) != FALSE;
+}
+
+bool Win32PlatformWindow::IsFocused() const noexcept {
+    return m_impl ? m_impl->focused : true;
+}
+
+bool Win32PlatformWindow::SupportsCustomTitleBar() const noexcept {
+    return true;
+}
+
+bool Win32PlatformWindow::IsCustomTitleBar() const noexcept {
+    return m_impl ? m_impl->customTitleBar : false;
+}
+
+bool Win32PlatformWindow::SetCustomTitleBar(bool enabled) noexcept {
+    if (!m_impl || !m_impl->hwnd || m_impl->fullscreen) {
+        return false;
+    }
+    if (m_impl->customTitleBar == enabled) {
+        return true;
+    }
+    m_impl->customTitleBar = enabled;
+    m_impl->trackingNcLeave = false;
+    m_impl->EnsureDwmLoaded();
+    if (m_impl->dwmExtendFrameIntoClientArea) {
+        const Win32DwmMargins margins{0, 0, 0, enabled ? 1 : 0};
+        (void)m_impl->dwmExtendFrameIntoClientArea(m_impl->hwnd, &margins);
+    }
+    (void)::SetWindowPos(
+        m_impl->hwnd,
+        nullptr,
+        0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+    );
+    RECT clientRc{};
+    if (::GetClientRect(m_impl->hwnd, &clientRc)) {
+        const keel::i32 nw = keel::max(1, keel::as<keel::i32>(clientRc.right - clientRc.left));
+        const keel::i32 nh = keel::max(1, keel::as<keel::i32>(clientRc.bottom - clientRc.top));
+        if (nw != m_impl->width || nh != m_impl->height) {
+            m_impl->width = nw;
+            m_impl->height = nh;
+            if (m_impl->callbacks.onResize) {
+                m_impl->callbacks.onResize(nw, nh);
+            }
+        }
+    }
+    if (m_impl->ui) {
+        m_impl->ui->InvalidateAll();
+        m_impl->ui->RequestRepaint(2);
+    }
+    return true;
+}
+
+void Win32PlatformWindow::StartSystemMove() noexcept {
+    if (!m_impl || !m_impl->hwnd) return;
+    if (::GetCapture() == m_impl->hwnd) {
+        ::ReleaseCapture();
+    }
+    m_impl->capturedButtons = 0u;
+    (void)::SendMessageW(m_impl->hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
+}
+
+void Win32PlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
+    if (!m_impl || !m_impl->hwnd) return;
+    WPARAM wmsz = 0;
+    switch (edge) {
+        case WindowHitRegion::ResizeLeft:        wmsz = WMSZ_LEFT; break;
+        case WindowHitRegion::ResizeRight:       wmsz = WMSZ_RIGHT; break;
+        case WindowHitRegion::ResizeTop:         wmsz = WMSZ_TOP; break;
+        case WindowHitRegion::ResizeBottom:      wmsz = WMSZ_BOTTOM; break;
+        case WindowHitRegion::ResizeTopLeft:     wmsz = WMSZ_TOPLEFT; break;
+        case WindowHitRegion::ResizeTopRight:    wmsz = WMSZ_TOPRIGHT; break;
+        case WindowHitRegion::ResizeBottomLeft:  wmsz = WMSZ_BOTTOMLEFT; break;
+        case WindowHitRegion::ResizeBottomRight: wmsz = WMSZ_BOTTOMRIGHT; break;
+        default: return;
+    }
+    if (::GetCapture() == m_impl->hwnd) {
+        ::ReleaseCapture();
+    }
+    m_impl->capturedButtons = 0u;
+    (void)::SendMessageW(m_impl->hwnd, WM_SYSCOMMAND, SC_SIZE | wmsz, 0);
+}
+
+bool Win32PlatformWindow::SupportsFileDialogs() const noexcept {
+    return true;
+}
+
+FileDialogResult Win32PlatformWindow::ShowFileDialog(const FileDialogOptions& opts) {
+    FileDialogResult result{};
+    result.supported = true;
+    result.accepted = false;
+
+    HWND owner = (m_impl && m_impl->hwnd) ? m_impl->hwnd : nullptr;
+    if (m_impl) {
+        if (m_impl->hwnd && ::GetCapture() == m_impl->hwnd) {
+            ::ReleaseCapture();
+        }
+        m_impl->capturedButtons = 0u;
+    }
+
+    const HRESULT hrCom = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool needUninit = SUCCEEDED(hrCom);
+    if (FAILED(hrCom) && hrCom != RPC_E_CHANGED_MODE) {
+        result.supported = false;
+        return result;
+    }
+
+    const bool isSave = (opts.kind == FileDialogKind::SaveFile);
+    IFileDialog* dialog = nullptr;
+    const HRESULT hrCreate = ::CoCreateInstance(
+        isSave ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        isSave ? IID_IFileSaveDialog : IID_IFileOpenDialog,
+        reinterpret_cast<void**>(&dialog)
+    );
+    if (FAILED(hrCreate) || !dialog) {
+        if (needUninit) ::CoUninitialize();
+        result.supported = false;
+        return result;
+    }
+
+    DWORD flags = 0u;
+    if (SUCCEEDED(dialog->GetOptions(&flags))) {
+        flags |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        if (opts.kind == FileDialogKind::OpenFile || opts.kind == FileDialogKind::OpenFiles) {
+            flags |= FOS_FILEMUSTEXIST;
+        }
+        if (opts.kind == FileDialogKind::OpenFiles) {
+            flags |= FOS_ALLOWMULTISELECT;
+        }
+        if (opts.kind == FileDialogKind::SelectFolder) {
+            flags |= FOS_PICKFOLDERS;
+        }
+        if (opts.kind == FileDialogKind::SaveFile) {
+            flags |= FOS_OVERWRITEPROMPT;
+        }
+        (void)dialog->SetOptions(flags);
+    }
+
+    if (!opts.title.empty()) {
+        const keel::Array<wchar_t> wTitle = Utf8ToWideZ(opts.title);
+        (void)dialog->SetTitle(wTitle.data());
+    }
+
+    if (!opts.defaultName.empty()) {
+        const keel::Array<wchar_t> wName = Utf8ToWideZ(opts.defaultName);
+        (void)dialog->SetFileName(wName.data());
+    }
+
+    if (!opts.defaultPath.empty()) {
+        keel::Array<wchar_t> wDir = Utf8ToWideZ(opts.defaultPath);
+        for (wchar_t& ch : wDir) {
+            if (ch == L'/') ch = L'\\';
+        }
+        IShellItem* folderItem = nullptr;
+        if (SUCCEEDED(::SHCreateItemFromParsingName(wDir.data(), nullptr, IID_PPV_ARGS(&folderItem))) && folderItem) {
+            (void)dialog->SetFolder(folderItem);
+            folderItem->Release();
+        }
+    }
+
+    // Populate extension filters for file dialogs (not applicable to folder pickers)
+    keel::Array<keel::Array<wchar_t>> filterNameBufs;
+    keel::Array<keel::Array<wchar_t>> filterSpecBufs;
+    keel::Array<COMDLG_FILTERSPEC> filterSpecs;
+    keel::String firstDefaultExt;
+    if (opts.kind != FileDialogKind::SelectFolder && !opts.filters.empty()) {
+        filterNameBufs.reserve(opts.filters.size());
+        filterSpecBufs.reserve(opts.filters.size());
+        filterSpecs.reserve(opts.filters.size());
+        for (const FileDialogFilter& f : opts.filters) {
+            if (f.pattern.empty()) continue;
+            if (opts.kind == FileDialogKind::SaveFile && firstDefaultExt.empty()) {
+                keel::usize sep = f.pattern.find(';');
+                keel::StringRef firstTok = f.pattern.substr(0u, sep == keel::StringRef::npos ? f.pattern.size() : sep).trim();
+                if (firstTok.size() > 2u && firstTok[0] == '*' && firstTok[1] == '.') {
+                    firstTok = firstTok.substr(2u);
+                    if (!firstTok.empty() && firstTok != "*") {
+                        firstDefaultExt = keel::String::from(firstTok);
+                    }
+                }
+            }
+            filterNameBufs.push_back(Utf8ToWideZ(f.name.empty() ? f.pattern : f.name));
+            filterSpecBufs.push_back(Utf8ToWideZ(f.pattern));
+            filterSpecs.push_back(COMDLG_FILTERSPEC{
+                .pszName = filterNameBufs.back().data(),
+                .pszSpec = filterSpecBufs.back().data()
+            });
+        }
+        if (!filterSpecs.empty()) {
+            (void)dialog->SetFileTypes(keel::as<UINT>(filterSpecs.size()), filterSpecs.data());
+            (void)dialog->SetFileTypeIndex(1u);
+            if (!firstDefaultExt.empty()) {
+                const keel::Array<wchar_t> wExt = Utf8ToWideZ(firstDefaultExt.as_ref());
+                (void)dialog->SetDefaultExtension(wExt.data());
+            }
+        }
+    }
+
+    const HRESULT hrShow = dialog->Show(owner);
+    if (SUCCEEDED(hrShow)) {
+        if (opts.kind == FileDialogKind::OpenFiles) {
+            IFileOpenDialog* openDlg = nullptr;
+            if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&openDlg))) && openDlg) {
+                IShellItemArray* items = nullptr;
+                if (SUCCEEDED(openDlg->GetResults(&items)) && items) {
+                    DWORD count = 0u;
+                    (void)items->GetCount(&count);
+                    result.paths.reserve(count);
+                    for (DWORD i = 0u; i < count; ++i) {
+                        IShellItem* item = nullptr;
+                        if (SUCCEEDED(items->GetItemAt(i, &item)) && item) {
+                            PWSTR wPath = nullptr;
+                            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wPath)) && wPath) {
+                                result.paths.push_back(WideToUtf8(wPath));
+                                ::CoTaskMemFree(wPath);
+                            }
+                            item->Release();
+                        }
+                    }
+                    items->Release();
+                }
+                openDlg->Release();
+            }
+        } else {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+                PWSTR wPath = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wPath)) && wPath) {
+                    result.paths.push_back(WideToUtf8(wPath));
+                    ::CoTaskMemFree(wPath);
+                }
+                item->Release();
+            }
+        }
+        result.accepted = !result.paths.empty();
+    }
+
+    dialog->Release();
+    if (needUninit) {
+        ::CoUninitialize();
+    }
+    return result;
+}
+
+MessageBoxChoice Win32PlatformWindow::ShowMessageBox(const MessageBoxOptions& opts) {
+    HWND owner = (m_impl && m_impl->hwnd) ? m_impl->hwnd : nullptr;
+    if (m_impl) {
+        if (m_impl->hwnd && ::GetCapture() == m_impl->hwnd) {
+            ::ReleaseCapture();
+        }
+        m_impl->capturedButtons = 0u;
+    }
+
+    UINT flags = 0u;
+    switch (opts.buttons) {
+        case MessageBoxButtons::Ok:          flags |= MB_OK; break;
+        case MessageBoxButtons::OkCancel:    flags |= MB_OKCANCEL; break;
+        case MessageBoxButtons::YesNo:       flags |= MB_YESNO; break;
+        case MessageBoxButtons::YesNoCancel: flags |= MB_YESNOCANCEL; break;
+    }
+    switch (opts.icon) {
+        case MessageBoxIcon::Info:     flags |= MB_ICONINFORMATION; break;
+        case MessageBoxIcon::Warning:  flags |= MB_ICONWARNING; break;
+        case MessageBoxIcon::Error:    flags |= MB_ICONERROR; break;
+        case MessageBoxIcon::Question: flags |= MB_ICONQUESTION; break;
+    }
+
+    const keel::Array<wchar_t> wTitle = Utf8ToWideZ(opts.title.empty() ? keel::StringRef("Message") : opts.title);
+    const keel::Array<wchar_t> wMsg = Utf8ToWideZ(opts.message);
+    const keel::i32 rc = ::MessageBoxW(owner, wMsg.data(), wTitle.data(), flags);
+    switch (rc) {
+        case IDOK:     return MessageBoxChoice::Ok;
+        case IDYES:    return MessageBoxChoice::Yes;
+        case IDNO:     return MessageBoxChoice::No;
+        case IDCANCEL:
+        default:       return MessageBoxChoice::Cancel;
+    }
+}
+
 keel::StringRef Win32PlatformWindow::GetPlatformName() const noexcept {
     return "Win32 (WGL + OpenGL 3.3 Core)";
 }
@@ -1542,6 +1999,21 @@ void Win32PlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void Win32PlatformWindow::SetCursor(CursorType) noexcept {}
 void Win32PlatformWindow::SetTextInputActive(bool, Rect) noexcept {}
 void Win32PlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
+void Win32PlatformWindow::SetTitle(keel::StringRef) noexcept {}
+void Win32PlatformWindow::Minimize() noexcept {}
+void Win32PlatformWindow::Maximize() noexcept {}
+void Win32PlatformWindow::Restore() noexcept {}
+void Win32PlatformWindow::RequestClose() noexcept {}
+bool Win32PlatformWindow::IsMaximized() const noexcept { return false; }
+bool Win32PlatformWindow::IsFocused() const noexcept { return true; }
+bool Win32PlatformWindow::SupportsCustomTitleBar() const noexcept { return false; }
+bool Win32PlatformWindow::IsCustomTitleBar() const noexcept { return false; }
+bool Win32PlatformWindow::SetCustomTitleBar(bool) noexcept { return false; }
+void Win32PlatformWindow::StartSystemMove() noexcept {}
+void Win32PlatformWindow::StartSystemResize(WindowHitRegion) noexcept {}
+bool Win32PlatformWindow::SupportsFileDialogs() const noexcept { return false; }
+FileDialogResult Win32PlatformWindow::ShowFileDialog(const FileDialogOptions&) { return {.accepted = false, .supported = false, .paths = {}}; }
+MessageBoxChoice Win32PlatformWindow::ShowMessageBox(const MessageBoxOptions&) { return MessageBoxChoice::Cancel; }
 keel::StringRef Win32PlatformWindow::GetPlatformName() const noexcept { return "Win32 (Unavailable)"; }
 
 } // namespace guikit::native

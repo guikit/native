@@ -49,6 +49,12 @@ public:
     void SetCursor(CursorType cursor) noexcept override;
     void OpenUrl(keel::StringRef url) const noexcept override;
 
+    void SetTitle(keel::StringRef title) noexcept override;
+    [[nodiscard]] bool SupportsCustomTitleBar() const noexcept override;
+    [[nodiscard]] bool SupportsFileDialogs() const noexcept override;
+    FileDialogResult ShowFileDialog(const FileDialogOptions& opts) override;
+    MessageBoxChoice ShowMessageBox(const MessageBoxOptions& opts) override;
+
     [[nodiscard]] keel::StringRef GetPlatformName() const noexcept override;
 
 private:

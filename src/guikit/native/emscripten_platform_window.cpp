@@ -734,6 +734,38 @@ void EmscriptenPlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
     guikit_js_open_url(urlStr.c_str(), keel::as<keel::i32>(urlStr.size()));
 }
 
+void EmscriptenPlatformWindow::SetTitle(keel::StringRef title) noexcept {
+    const keel::String titleStr = keel::String::from(title);
+    emscripten_set_window_title(titleStr.c_str());
+}
+
+bool EmscriptenPlatformWindow::SupportsCustomTitleBar() const noexcept {
+    return false;
+}
+
+bool EmscriptenPlatformWindow::SupportsFileDialogs() const noexcept {
+    return false;
+}
+
+FileDialogResult EmscriptenPlatformWindow::ShowFileDialog(const FileDialogOptions&) {
+    return FileDialogResult{.accepted = false, .supported = false, .paths = {}};
+}
+
+MessageBoxChoice EmscriptenPlatformWindow::ShowMessageBox(const MessageBoxOptions& opts) {
+    const keel::String msg = keel::String::from(opts.message);
+    if (opts.buttons == MessageBoxButtons::Ok) {
+        EM_ASM({ window.alert(UTF8ToString($0)); }, msg.c_str());
+        return MessageBoxChoice::Ok;
+    }
+    const keel::i32 ok = EM_ASM_INT({ return window.confirm(UTF8ToString($0)) ? 1 : 0; }, msg.c_str());
+    if (ok != 0) {
+        return (opts.buttons == MessageBoxButtons::YesNo || opts.buttons == MessageBoxButtons::YesNoCancel)
+            ? MessageBoxChoice::Yes
+            : MessageBoxChoice::Ok;
+    }
+    return (opts.buttons == MessageBoxButtons::YesNo) ? MessageBoxChoice::No : MessageBoxChoice::Cancel;
+}
+
 keel::StringRef EmscriptenPlatformWindow::GetPlatformName() const noexcept {
     return "Emscripten + WebGL2";
 }
@@ -765,6 +797,11 @@ bool EmscriptenPlatformWindow::IsVsyncEnabled() const noexcept { return true; }
 void EmscriptenPlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void EmscriptenPlatformWindow::SetCursor(CursorType) noexcept {}
 void EmscriptenPlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
+void EmscriptenPlatformWindow::SetTitle(keel::StringRef) noexcept {}
+bool EmscriptenPlatformWindow::SupportsCustomTitleBar() const noexcept { return false; }
+bool EmscriptenPlatformWindow::SupportsFileDialogs() const noexcept { return false; }
+FileDialogResult EmscriptenPlatformWindow::ShowFileDialog(const FileDialogOptions&) { return {.accepted = false, .supported = false, .paths = {}}; }
+MessageBoxChoice EmscriptenPlatformWindow::ShowMessageBox(const MessageBoxOptions&) { return MessageBoxChoice::Cancel; }
 keel::StringRef EmscriptenPlatformWindow::GetPlatformName() const noexcept { return "Emscripten (Unavailable)"; }
 
 #endif // __EMSCRIPTEN__

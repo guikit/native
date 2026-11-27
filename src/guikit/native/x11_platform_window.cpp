@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
+#include <sys/wait.h>
 #include <unistd.h>
 using X11Card = unsigned long; // keel-lint: ignore
 using X11Long = long; // keel-lint: ignore
@@ -120,6 +121,9 @@ struct X11Api {
     using PfnXDeleteProperty = keel::i32(*)(Display*, Window, Atom);
     using PfnXSendEvent = Status(*)(Display*, Window, Bool, X11Long, XEvent*);
     using PfnXCheckTypedWindowEvent = Bool(*)(Display*, Window, keel::i32, XEvent*);
+    using PfnXIconifyWindow = Status(*)(Display*, Window, keel::i32);
+    using PfnXUngrabPointer = keel::i32(*)(Display*, Time);
+    using PfnXQueryPointer = Bool(*)(Display*, Window, Window*, Window*, keel::i32*, keel::i32*, keel::i32*, keel::i32*, keel::u32*);
 
     PfnXOpenDisplay OpenDisplay{nullptr};
     PfnXCloseDisplay CloseDisplay{nullptr};
@@ -162,6 +166,9 @@ struct X11Api {
     PfnXDeleteProperty DeleteProperty{nullptr};
     PfnXSendEvent SendEvent{nullptr};
     PfnXCheckTypedWindowEvent CheckTypedWindowEvent{nullptr};
+    PfnXIconifyWindow IconifyWindow{nullptr};
+    PfnXUngrabPointer UngrabPointer{nullptr};
+    PfnXQueryPointer QueryPointer{nullptr};
 
     bool Load() noexcept {
         if (lib.is_open()) return true;
@@ -211,6 +218,9 @@ struct X11Api {
         DeleteProperty = lib.symbol<PfnXDeleteProperty>("XDeleteProperty");
         SendEvent = lib.symbol<PfnXSendEvent>("XSendEvent");
         CheckTypedWindowEvent = lib.symbol<PfnXCheckTypedWindowEvent>("XCheckTypedWindowEvent");
+        IconifyWindow = lib.symbol<PfnXIconifyWindow>("XIconifyWindow");
+        UngrabPointer = lib.symbol<PfnXUngrabPointer>("XUngrabPointer");
+        QueryPointer = lib.symbol<PfnXQueryPointer>("XQueryPointer");
 
         return OpenDisplay && CloseDisplay && DefaultScreen && RootWindow &&
                CreateSimpleWindow && DestroyWindow && SelectInput && MapWindow &&
@@ -444,6 +454,9 @@ struct X11PlatformWindow::Impl {
     Atom atomUtf8String{0};
     Atom atomTargets{0};
     Atom atomClipboardProp{0};
+    Atom atomNetWmState{0};
+    Atom atomNetWmStateMaxH{0};
+    Atom atomNetWmStateMaxV{0};
     XIM xim{nullptr};
     XIC xic{nullptr};
 
@@ -457,9 +470,13 @@ struct X11PlatformWindow::Impl {
     keel::f32 dpiScale{1.0f};
     keel::f32 pixelsPerMm{96.0f / 25.4f};
     bool vsync{true};
+    bool customTitleBar{false};
+    bool maximized{false};
+    bool focused{true};
     bool minimized{false};
     bool closeRequested{false};
     bool alive{false};
+    bool resizeCursorOverride{false};
 
     CursorType activeCursor{CursorType::Default};
     Cursor cursors[9]{};
@@ -810,8 +827,10 @@ struct X11PlatformWindow::Impl {
 
     void ApplyWindowStateFlags(const PlatformWindowDesc& desc) noexcept {
         if (!display || window == 0 || !x11.ChangeProperty) return;
+        customTitleBar = desc.customTitleBar && !desc.fullscreen;
+        maximized = desc.maximized;
 
-        if (desc.borderless) {
+        if (desc.borderless || customTitleBar) {
             const Atom motifHintsAtom = x11.InternAtom(display, "_MOTIF_WM_HINTS", False);
             if (motifHintsAtom != kX11None) {
                 struct MotifWmHints {
@@ -865,6 +884,104 @@ struct X11PlatformWindow::Impl {
         }
     }
 
+    void ApplyRawCursor(CursorType cursor) noexcept {
+        if (!display || window == 0) return;
+        const auto idx = keel::as<keel::usize>(cursor);
+        if (idx >= 9u) return;
+        if (cursor == CursorType::Default) {
+            if (x11.UndefineCursor) {
+                x11.UndefineCursor(display, window);
+            }
+            return;
+        }
+        if (cursors[idx] == 0 && x11.CreateFontCursor) {
+            cursors[idx] = x11.CreateFontCursor(display, MapCursorShape(cursor));
+        }
+        if (cursors[idx] != 0 && x11.DefineCursor) {
+            x11.DefineCursor(display, window, cursors[idx]);
+        }
+    }
+
+    void SyncMaximizedFromNetWmState(Context& ui) noexcept {
+        if (!display || window == 0 || atomNetWmState == kX11None || !x11.GetWindowProperty) {
+            return;
+        }
+        Atom actualType = kX11None;
+        keel::i32 actualFormat = 0;
+        X11Card itemCount = 0u;
+        X11Card bytesAfter = 0u;
+        keel::u8* propData = nullptr;
+        if (x11.GetWindowProperty(
+                display, window, atomNetWmState, 0, 32, False, kX11XaAtom,
+                &actualType, &actualFormat, &itemCount, &bytesAfter, &propData
+            ) == Success && propData) {
+            bool hasMaxH = false;
+            bool hasMaxV = false;
+            if (actualFormat == 32) {
+                const auto* atoms = reinterpret_cast<const Atom*>(propData);
+                for (X11Card i = 0u; i < itemCount; ++i) {
+                    if (atoms[i] == atomNetWmStateMaxH) hasMaxH = true;
+                    if (atoms[i] == atomNetWmStateMaxV) hasMaxV = true;
+                }
+            }
+            if (x11.Free) {
+                x11.Free(propData);
+            }
+            const bool nowMax = hasMaxH && hasMaxV;
+            if (nowMax != maximized) {
+                maximized = nowMax;
+                ui.InvalidateAll();
+                ui.RequestRepaint(2);
+            }
+        }
+    }
+
+    static bool MapResizeRegionToX11(WindowHitRegion reg, CursorType& outCursor, X11Long& outDir) noexcept {
+        switch (reg) {
+            case WindowHitRegion::ResizeTopLeft:     outCursor = CursorType::ResizeNWSE; outDir = 0; return true;
+            case WindowHitRegion::ResizeTop:         outCursor = CursorType::ResizeNS;   outDir = 1; return true;
+            case WindowHitRegion::ResizeTopRight:    outCursor = CursorType::ResizeNESW; outDir = 2; return true;
+            case WindowHitRegion::ResizeRight:       outCursor = CursorType::ResizeEW;   outDir = 3; return true;
+            case WindowHitRegion::ResizeBottomRight: outCursor = CursorType::ResizeNWSE; outDir = 4; return true;
+            case WindowHitRegion::ResizeBottom:      outCursor = CursorType::ResizeNS;   outDir = 5; return true;
+            case WindowHitRegion::ResizeBottomLeft:  outCursor = CursorType::ResizeNESW; outDir = 6; return true;
+            case WindowHitRegion::ResizeLeft:        outCursor = CursorType::ResizeEW;   outDir = 7; return true;
+            default: return false;
+        }
+    }
+
+    void StartMoveResizeAction(X11Long direction) noexcept {
+        if (!display || window == 0 || !x11.SendEvent) return;
+        const Atom moveResize = x11.InternAtom(display, "_NET_WM_MOVERESIZE", False);
+        if (moveResize == kX11None) return;
+        const Window root = x11.RootWindow(display, screen);
+        keel::i32 rootX = 0;
+        keel::i32 rootY = 0;
+        if (x11.QueryPointer) {
+            Window dummyRoot = 0;
+            Window dummyChild = 0;
+            keel::i32 winX = 0;
+            keel::i32 winY = 0;
+            keel::u32 mask = 0u;
+            (void)x11.QueryPointer(display, window, &dummyRoot, &dummyChild, &rootX, &rootY, &winX, &winY, &mask);
+        }
+        if (x11.UngrabPointer) {
+            (void)x11.UngrabPointer(display, CurrentTime);
+        }
+        XEvent ev{};
+        ev.xclient.type = ClientMessage;
+        ev.xclient.window = window;
+        ev.xclient.message_type = moveResize;
+        ev.xclient.format = 32;
+        ev.xclient.data.l[0] = rootX;
+        ev.xclient.data.l[1] = rootY;
+        ev.xclient.data.l[2] = direction;
+        ev.xclient.data.l[3] = 1; // left mouse button
+        ev.xclient.data.l[4] = 1; // normal application source
+        (void)x11.SendEvent(display, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+        x11.Flush(display);
+    }
+
     void DispatchEvent(XEvent& ev, Context& ui) {
         if (x11.FilterEvent && x11.FilterEvent(&ev, kX11None)) {
             return;
@@ -912,18 +1029,59 @@ struct X11PlatformWindow::Impl {
                 HandleSelectionRequest(ev.xselectionrequest);
                 break;
 
+            case FocusIn:
+                focused = true;
+                ui.InvalidateAll();
+                ui.RequestRepaint(2);
+                break;
+
             case FocusOut:
+                focused = false;
                 ui.SetKeyModifiers({});
+                ui.InvalidateAll();
+                ui.RequestRepaint(2);
                 break;
 
-            case MotionNotify:
+            case PropertyNotify:
+                if (ev.xproperty.atom == atomNetWmState) {
+                    SyncMaximizedFromNetWmState(ui);
+                }
+                break;
+
+            case MotionNotify: {
                 ui.SetKeyModifiers(ExtractX11Modifiers(ev.xmotion.state));
-                ui.OnMouseMove({keel::as<keel::f32>(ev.xmotion.x), keel::as<keel::f32>(ev.xmotion.y)});
+                const Vec2 physPos{keel::as<keel::f32>(ev.xmotion.x), keel::as<keel::f32>(ev.xmotion.y)};
+                if (customTitleBar && callbacks.onHitTest) {
+                    const keel::f32 safeDpi = (dpiScale > 0.1f) ? dpiScale : 1.0f;
+                    const WindowHitRegion reg = callbacks.onHitTest({physPos.x / safeDpi, physPos.y / safeDpi});
+                    CursorType resizeCur = CursorType::Default;
+                    X11Long dir = -1;
+                    if (MapResizeRegionToX11(reg, resizeCur, dir)) {
+                        ApplyRawCursor(resizeCur);
+                        resizeCursorOverride = true;
+                    } else if (resizeCursorOverride) {
+                        resizeCursorOverride = false;
+                        ApplyRawCursor(activeCursor);
+                    }
+                }
+                ui.OnMouseMove(physPos);
                 break;
+            }
 
-            case ButtonPress:
+            case ButtonPress: {
                 ui.SetKeyModifiers(ExtractX11Modifiers(ev.xbutton.state));
-                ui.OnMouseMove({keel::as<keel::f32>(ev.xbutton.x), keel::as<keel::f32>(ev.xbutton.y)});
+                const Vec2 physPos{keel::as<keel::f32>(ev.xbutton.x), keel::as<keel::f32>(ev.xbutton.y)};
+                if (customTitleBar && ev.xbutton.button == 1 && callbacks.onHitTest) {
+                    const keel::f32 safeDpi = (dpiScale > 0.1f) ? dpiScale : 1.0f;
+                    const WindowHitRegion reg = callbacks.onHitTest({physPos.x / safeDpi, physPos.y / safeDpi});
+                    CursorType resizeCur = CursorType::Default;
+                    X11Long dir = -1;
+                    if (MapResizeRegionToX11(reg, resizeCur, dir)) {
+                        StartMoveResizeAction(dir);
+                        break;
+                    }
+                }
+                ui.OnMouseMove(physPos);
                 if (ev.xbutton.button == 1) ui.OnMouseDown(1);
                 else if (ev.xbutton.button == 2) ui.OnMouseDown(2);
                 else if (ev.xbutton.button == 3) ui.OnMouseDown(3);
@@ -932,6 +1090,7 @@ struct X11PlatformWindow::Impl {
                 else if (ev.xbutton.button == 6) ui.OnMouseWheel(1.0f, 0.0f);
                 else if (ev.xbutton.button == 7) ui.OnMouseWheel(-1.0f, 0.0f);
                 break;
+            }
 
             case ButtonRelease:
                 ui.SetKeyModifiers(ExtractX11Modifiers(ev.xbutton.state));
@@ -1065,7 +1224,7 @@ bool X11PlatformWindow::Create(
     }
 
     const long eventMask = // keel-lint: ignore
-        ExposureMask | StructureNotifyMask |
+        ExposureMask | StructureNotifyMask | PropertyChangeMask |
         KeyPressMask | KeyReleaseMask |
         ButtonPressMask | ButtonReleaseMask |
         PointerMotionMask | FocusChangeMask;
@@ -1076,6 +1235,9 @@ bool X11PlatformWindow::Create(
     m_impl->atomUtf8String = m_impl->x11.InternAtom(m_impl->display, "UTF8_STRING", False);
     m_impl->atomTargets = m_impl->x11.InternAtom(m_impl->display, "TARGETS", False);
     m_impl->atomClipboardProp = m_impl->x11.InternAtom(m_impl->display, "GUIKIT_CLIPBOARD", False);
+    m_impl->atomNetWmState = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE", False);
+    m_impl->atomNetWmStateMaxH = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+    m_impl->atomNetWmStateMaxV = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
     m_impl->x11.SetWMProtocols(m_impl->display, m_impl->window, &m_impl->wmDeleteWindow, 1);
 
     const keel::String titleStr = keel::String::from(desc.title.as_ref());
@@ -1278,20 +1440,8 @@ void X11PlatformWindow::SetCursor(CursorType cursor) noexcept {
         return;
     }
     m_impl->activeCursor = cursor;
-    const auto idx = keel::as<keel::usize>(cursor);
-    if (idx >= 9u) return;
-
-    if (cursor == CursorType::Default) {
-        if (m_impl->x11.UndefineCursor) {
-            m_impl->x11.UndefineCursor(m_impl->display, m_impl->window);
-        }
-        return;
-    }
-    if (m_impl->cursors[idx] == 0 && m_impl->x11.CreateFontCursor) {
-        m_impl->cursors[idx] = m_impl->x11.CreateFontCursor(m_impl->display, MapCursorShape(cursor));
-    }
-    if (m_impl->cursors[idx] != 0 && m_impl->x11.DefineCursor) {
-        m_impl->x11.DefineCursor(m_impl->display, m_impl->window, m_impl->cursors[idx]);
+    if (!m_impl->resizeCursorOverride) {
+        m_impl->ApplyRawCursor(cursor);
     }
 }
 
@@ -1303,6 +1453,363 @@ void X11PlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
         ::execlp("xdg-open", "xdg-open", urlStr.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
+}
+
+void X11PlatformWindow::SetTitle(keel::StringRef title) noexcept {
+    if (!m_impl || !m_impl->display || m_impl->window == 0) return;
+    const keel::String titleStr = keel::String::from(title);
+    if (m_impl->x11.StoreName) {
+        m_impl->x11.StoreName(m_impl->display, m_impl->window, titleStr.c_str());
+    }
+    if (m_impl->x11.ChangeProperty) {
+        const Atom netWmName = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_NAME", False);
+        const Atom utf8Str = m_impl->x11.InternAtom(m_impl->display, "UTF8_STRING", False);
+        if (netWmName != kX11None && utf8Str != kX11None) {
+            m_impl->x11.ChangeProperty(
+                m_impl->display,
+                m_impl->window,
+                netWmName,
+                utf8Str,
+                8,
+                PropModeReplace,
+                reinterpret_cast<const keel::u8*>(titleStr.c_str()),
+                keel::as<keel::i32>(titleStr.size())
+            );
+        }
+    }
+    m_impl->x11.Flush(m_impl->display);
+}
+
+void X11PlatformWindow::Minimize() noexcept {
+    if (!m_impl || !m_impl->display || m_impl->window == 0) return;
+    if (m_impl->x11.IconifyWindow) {
+        (void)m_impl->x11.IconifyWindow(m_impl->display, m_impl->window, m_impl->screen);
+        m_impl->x11.Flush(m_impl->display);
+    }
+}
+
+namespace {
+
+void SendX11NetWmState(
+    X11Api& x11,
+    Display* display,
+    keel::i32 screen,
+    Window win,
+    X11Long action,
+    Atom prop1,
+    Atom prop2
+) noexcept {
+    if (!display || win == 0 || !x11.SendEvent) return;
+    const Atom netWmState = x11.InternAtom(display, "_NET_WM_STATE", False);
+    if (netWmState == kX11None) return;
+    XEvent ev{};
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = win;
+    ev.xclient.message_type = netWmState;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = action;
+    ev.xclient.data.l[1] = keel::as<X11Long>(prop1);
+    ev.xclient.data.l[2] = keel::as<X11Long>(prop2);
+    ev.xclient.data.l[3] = 1; // normal application source
+    const Window root = x11.RootWindow(display, screen);
+    (void)x11.SendEvent(display, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+    x11.Flush(display);
+}
+
+struct ExecCaptureResult {
+    bool launched{false};
+    keel::i32 exitCode{-1};
+    keel::String output;
+};
+
+ExecCaptureResult RunExternalDialogCommand(const keel::Array<keel::String>& args) {
+    ExecCaptureResult res{};
+    if (args.empty()) return res;
+
+    int pipeFds[2]{-1, -1}; // keel-lint: ignore
+    if (::pipe(pipeFds) != 0) {
+        return res;
+    }
+
+    keel::Array<char*> argv;
+    argv.reserve(args.size() + 1u);
+    for (const keel::String& s : args) {
+        argv.push_back(const_cast<char*>(s.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(pipeFds[0]);
+        ::close(pipeFds[1]);
+        return res;
+    }
+    if (pid == 0) {
+        ::close(pipeFds[0]);
+        (void)::dup2(pipeFds[1], STDOUT_FILENO);
+        ::close(pipeFds[1]);
+        const int devNull = ::open("/dev/null", O_WRONLY); // keel-lint: ignore
+        if (devNull >= 0) {
+            (void)::dup2(devNull, STDERR_FILENO);
+            ::close(devNull);
+        }
+        ::execvp(argv[0], argv.data());
+        ::_exit(127);
+    }
+
+    ::close(pipeFds[1]);
+    char buf[1024]{};
+    while (true) {
+        const keel::isize n = ::read(pipeFds[0], buf, sizeof(buf));
+        if (n <= 0) break;
+        res.output.append(keel::StringRef(buf, keel::as<keel::usize>(n)));
+    }
+    ::close(pipeFds[0]);
+
+    int status = 0; // keel-lint: ignore
+    (void)::waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        res.exitCode = WEXITSTATUS(status);
+        res.launched = (res.exitCode != 127);
+    }
+    return res;
+}
+
+} // namespace
+
+void X11PlatformWindow::Maximize() noexcept {
+    if (!m_impl || !m_impl->display || m_impl->window == 0) return;
+    const Atom maxH = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+    const Atom maxV = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+    SendX11NetWmState(m_impl->x11, m_impl->display, m_impl->screen, m_impl->window, 1, maxH, maxV);
+    m_impl->maximized = true;
+}
+
+void X11PlatformWindow::Restore() noexcept {
+    if (!m_impl || !m_impl->display || m_impl->window == 0) return;
+    const Atom maxH = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+    const Atom maxV = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+    SendX11NetWmState(m_impl->x11, m_impl->display, m_impl->screen, m_impl->window, 0, maxH, maxV);
+    m_impl->maximized = false;
+}
+
+void X11PlatformWindow::RequestClose() noexcept {
+    if (!m_impl) return;
+    if (!m_impl->callbacks.onCloseRequested || m_impl->callbacks.onCloseRequested()) {
+        m_impl->closeRequested = true;
+    }
+}
+
+bool X11PlatformWindow::IsMaximized() const noexcept {
+    return m_impl ? m_impl->maximized : false;
+}
+
+bool X11PlatformWindow::IsFocused() const noexcept {
+    return m_impl ? m_impl->focused : true;
+}
+
+bool X11PlatformWindow::SupportsCustomTitleBar() const noexcept {
+    return true;
+}
+
+bool X11PlatformWindow::IsCustomTitleBar() const noexcept {
+    return m_impl ? m_impl->customTitleBar : false;
+}
+
+bool X11PlatformWindow::SetCustomTitleBar(bool enabled) noexcept {
+    if (!m_impl || !m_impl->display || m_impl->window == 0 || !m_impl->x11.ChangeProperty) {
+        return false;
+    }
+    if (m_impl->customTitleBar == enabled) {
+        return true;
+    }
+    m_impl->customTitleBar = enabled;
+    const Atom motifHintsAtom = m_impl->x11.InternAtom(m_impl->display, "_MOTIF_WM_HINTS", False);
+    if (motifHintsAtom != kX11None) {
+        struct MotifWmHints {
+            X11Card flags;
+            X11Card functions;
+            X11Card decorations;
+            X11Long inputMode;
+            X11Card status;
+        };
+        const MotifWmHints hints{2u, 0u, enabled ? 0u : 1u, 0, 0u};
+        (void)m_impl->x11.ChangeProperty(
+            m_impl->display,
+            m_impl->window,
+            motifHintsAtom,
+            motifHintsAtom,
+            32,
+            PropModeReplace,
+            reinterpret_cast<const keel::u8*>(&hints),
+            5
+        );
+        m_impl->x11.Flush(m_impl->display);
+    }
+    if (!enabled && m_impl->resizeCursorOverride) {
+        m_impl->resizeCursorOverride = false;
+        m_impl->ApplyRawCursor(m_impl->activeCursor);
+    }
+    return true;
+}
+
+void X11PlatformWindow::StartSystemMove() noexcept {
+    if (!m_impl) return;
+    m_impl->StartMoveResizeAction(8); // _NET_WM_MOVERESIZE_MOVE
+}
+
+void X11PlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
+    if (!m_impl) return;
+    CursorType ignoredCur = CursorType::Default;
+    X11Long dir = -1;
+    if (Impl::MapResizeRegionToX11(edge, ignoredCur, dir)) {
+        m_impl->StartMoveResizeAction(dir);
+    }
+}
+
+bool X11PlatformWindow::SupportsFileDialogs() const noexcept {
+    return true;
+}
+
+FileDialogResult X11PlatformWindow::ShowFileDialog(const FileDialogOptions& opts) {
+    FileDialogResult result{};
+    result.supported = false;
+    result.accepted = false;
+
+    // 1. Try zenity first (GNOME/GTK ecosystems)
+    {
+        keel::Array<keel::String> args;
+        args.push_back(keel::String("zenity"));
+        args.push_back(keel::String("--file-selection"));
+        if (!opts.title.empty()) {
+            args.push_back(keel::String("--title"));
+            args.push_back(keel::String::from(opts.title));
+        }
+        if (opts.kind == FileDialogKind::OpenFiles) {
+            args.push_back(keel::String("--multiple"));
+            args.push_back(keel::String("--separator=\n"));
+        } else if (opts.kind == FileDialogKind::SaveFile) {
+            args.push_back(keel::String("--save"));
+            args.push_back(keel::String("--confirm-overwrite"));
+        } else if (opts.kind == FileDialogKind::SelectFolder) {
+            args.push_back(keel::String("--directory"));
+        }
+        if (!opts.defaultPath.empty() || !opts.defaultName.empty()) {
+            keel::String fn = keel::String::from(opts.defaultPath);
+            if (!opts.defaultName.empty()) {
+                if (!fn.empty() && fn.back() != '/') fn.push_back('/');
+                fn.append(opts.defaultName);
+            }
+            if (!fn.empty()) {
+                args.push_back(keel::String("--filename"));
+                args.push_back(keel::move(fn));
+            }
+        }
+        if (opts.kind != FileDialogKind::SelectFolder) {
+            for (const FileDialogFilter& f : opts.filters) {
+                if (f.pattern.empty()) continue;
+                keel::String spec = keel::String::from(f.name.empty() ? f.pattern : f.name);
+                spec.append(" | ");
+                for (keel::usize i = 0u; i < f.pattern.size(); ++i) {
+                    spec.push_back(f.pattern[i] == ';' ? ' ' : f.pattern[i]);
+                }
+                args.push_back(keel::String("--file-filter"));
+                args.push_back(keel::move(spec));
+            }
+        }
+
+        const ExecCaptureResult exec = RunExternalDialogCommand(args);
+        if (exec.launched) {
+            result.supported = true;
+            if (exec.exitCode == 0) {
+                keel::usize pos = 0u;
+                while (pos < exec.output.size()) {
+                    keel::usize nl = exec.output.find('\n', pos);
+                    if (nl == keel::StringRef::npos) nl = exec.output.size();
+                    const keel::StringRef line = exec.output.substr(pos, nl - pos).trim();
+                    if (!line.empty()) {
+                        result.paths.push_back(keel::String::from(line));
+                    }
+                    pos = (nl < exec.output.size()) ? (nl + 1u) : exec.output.size();
+                }
+                result.accepted = !result.paths.empty();
+            }
+            return result;
+        }
+    }
+
+    // 2. Fallback to kdialog (KDE/Qt ecosystems)
+    {
+        keel::Array<keel::String> args;
+        args.push_back(keel::String("kdialog"));
+        if (!opts.title.empty()) {
+            args.push_back(keel::String("--title"));
+            args.push_back(keel::String::from(opts.title));
+        }
+        switch (opts.kind) {
+            case FileDialogKind::OpenFile:     args.push_back(keel::String("--getopenfilename")); break;
+            case FileDialogKind::OpenFiles:    args.push_back(keel::String("--getopenfilename")); args.push_back(keel::String("--multiple")); args.push_back(keel::String("--separate-output")); break;
+            case FileDialogKind::SaveFile:     args.push_back(keel::String("--getsavefilename")); break;
+            case FileDialogKind::SelectFolder: args.push_back(keel::String("--getexistingdirectory")); break;
+        }
+        if (!opts.defaultPath.empty()) {
+            args.push_back(keel::String::from(opts.defaultPath));
+        } else {
+            args.push_back(keel::String("."));
+        }
+
+        const ExecCaptureResult exec = RunExternalDialogCommand(args);
+        if (exec.launched) {
+            result.supported = true;
+            if (exec.exitCode == 0) {
+                keel::usize pos = 0u;
+                while (pos < exec.output.size()) {
+                    keel::usize nl = exec.output.find('\n', pos);
+                    if (nl == keel::StringRef::npos) nl = exec.output.size();
+                    const keel::StringRef line = exec.output.substr(pos, nl - pos).trim();
+                    if (!line.empty()) {
+                        result.paths.push_back(keel::String::from(line));
+                    }
+                    pos = (nl < exec.output.size()) ? (nl + 1u) : exec.output.size();
+                }
+                result.accepted = !result.paths.empty();
+            }
+            return result;
+        }
+    }
+
+    return result;
+}
+
+MessageBoxChoice X11PlatformWindow::ShowMessageBox(const MessageBoxOptions& opts) {
+    keel::Array<keel::String> args;
+    args.push_back(keel::String("zenity"));
+    if (opts.buttons == MessageBoxButtons::Ok) {
+        switch (opts.icon) {
+            case MessageBoxIcon::Warning: args.push_back(keel::String("--warning")); break;
+            case MessageBoxIcon::Error:   args.push_back(keel::String("--error")); break;
+            default:                      args.push_back(keel::String("--info")); break;
+        }
+    } else {
+        args.push_back(keel::String("--question"));
+    }
+    if (!opts.title.empty()) {
+        args.push_back(keel::String("--title"));
+        args.push_back(keel::String::from(opts.title));
+    }
+    args.push_back(keel::String("--text"));
+    args.push_back(keel::String::from(opts.message));
+
+    const ExecCaptureResult exec = RunExternalDialogCommand(args);
+    if (!exec.launched) {
+        return MessageBoxChoice::Cancel;
+    }
+    if (exec.exitCode == 0) {
+        return (opts.buttons == MessageBoxButtons::YesNo || opts.buttons == MessageBoxButtons::YesNoCancel)
+            ? MessageBoxChoice::Yes
+            : MessageBoxChoice::Ok;
+    }
+    return (opts.buttons == MessageBoxButtons::YesNo) ? MessageBoxChoice::No : MessageBoxChoice::Cancel;
 }
 
 keel::StringRef X11PlatformWindow::GetPlatformName() const noexcept {
@@ -1333,6 +1840,21 @@ bool X11PlatformWindow::IsVsyncEnabled() const noexcept { return true; }
 void X11PlatformWindow::SetVsyncEnabled(bool) noexcept {}
 void X11PlatformWindow::SetCursor(CursorType) noexcept {}
 void X11PlatformWindow::OpenUrl(keel::StringRef) const noexcept {}
+void X11PlatformWindow::SetTitle(keel::StringRef) noexcept {}
+void X11PlatformWindow::Minimize() noexcept {}
+void X11PlatformWindow::Maximize() noexcept {}
+void X11PlatformWindow::Restore() noexcept {}
+void X11PlatformWindow::RequestClose() noexcept {}
+bool X11PlatformWindow::IsMaximized() const noexcept { return false; }
+bool X11PlatformWindow::IsFocused() const noexcept { return true; }
+bool X11PlatformWindow::SupportsCustomTitleBar() const noexcept { return false; }
+bool X11PlatformWindow::IsCustomTitleBar() const noexcept { return false; }
+bool X11PlatformWindow::SetCustomTitleBar(bool) noexcept { return false; }
+void X11PlatformWindow::StartSystemMove() noexcept {}
+void X11PlatformWindow::StartSystemResize(WindowHitRegion) noexcept {}
+bool X11PlatformWindow::SupportsFileDialogs() const noexcept { return false; }
+FileDialogResult X11PlatformWindow::ShowFileDialog(const FileDialogOptions&) { return {.accepted = false, .supported = false, .paths = {}}; }
+MessageBoxChoice X11PlatformWindow::ShowMessageBox(const MessageBoxOptions&) { return MessageBoxChoice::Cancel; }
 keel::StringRef X11PlatformWindow::GetPlatformName() const noexcept { return "X11 (Unavailable)"; }
 
 #endif // GUIKIT_NATIVE_COMPILE_X11

@@ -43,6 +43,23 @@ public:
     void SetCursor(CursorType cursor) noexcept override;
     void OpenUrl(keel::StringRef url) const noexcept override;
 
+    void SetTitle(keel::StringRef title) noexcept override;
+    void Minimize() noexcept override;
+    void Maximize() noexcept override;
+    void Restore() noexcept override;
+    void RequestClose() noexcept override;
+    [[nodiscard]] bool IsMaximized() const noexcept override;
+    [[nodiscard]] bool IsFocused() const noexcept override;
+    [[nodiscard]] bool SupportsCustomTitleBar() const noexcept override;
+    [[nodiscard]] bool IsCustomTitleBar() const noexcept override;
+    bool SetCustomTitleBar(bool enabled) noexcept override;
+    void StartSystemMove() noexcept override;
+    void StartSystemResize(WindowHitRegion edge) noexcept override;
+
+    [[nodiscard]] bool SupportsFileDialogs() const noexcept override;
+    FileDialogResult ShowFileDialog(const FileDialogOptions& opts) override;
+    MessageBoxChoice ShowMessageBox(const MessageBoxOptions& opts) override;
+
     [[nodiscard]] keel::StringRef GetPlatformName() const noexcept override;
 
 private:
