@@ -51,6 +51,7 @@ public:
     void End() override;
 
     [[nodiscard]] keel::f32 GetScale() const noexcept override;
+    [[nodiscard]] Transform2D GetPixelTransform() const noexcept override;
     void SetScale(keel::f32 scale) override;
 
     void PushTransform(const Transform2D& transform) override;

@@ -3222,6 +3222,13 @@ keel::f32 GlEs3Canvas::GetScale() const noexcept {
     return m_impl->EffScale();
 }
 
+Transform2D GlEs3Canvas::GetPixelTransform() const noexcept {
+    return Transform2D{
+        m_impl->EffScale(),
+        Vec2{m_impl->xfOffset.x * m_impl->scale, m_impl->xfOffset.y * m_impl->scale}
+    };
+}
+
 void GlEs3Canvas::SetScale(keel::f32 scale) {
     m_impl->scale = (scale > 0.0f) ? scale : 1.0f;
 }
