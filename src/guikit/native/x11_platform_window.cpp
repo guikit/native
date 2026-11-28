@@ -12,6 +12,7 @@
 #include "keel/time.h"
 #include "linux/linux_desktop_services.hpp"
 #include "linux/linux_egl_context.hpp"
+#include "linux/linux_keymap.hpp"
 
 #if defined(__linux__) && !defined(__ANDROID__) && __has_include(<X11/Xlib.h>)
 #define GUIKIT_NATIVE_COMPILE_X11 1
@@ -262,57 +263,6 @@ struct XSyncApi {
         return QueryExtension && Initialize && CreateCounter && SetCounter && DestroyCounter;
     }
 };
-
-[[nodiscard]] Key MapX11KeySym(KeySym ks) noexcept {
-    switch (ks) {
-        case XK_BackSpace: return Key::Backspace;
-        case XK_Delete:
-        case XK_KP_Delete: return Key::Delete;
-        case XK_Return:
-        case XK_KP_Enter:  return Key::Enter;
-        case XK_Escape:    return Key::Escape;
-        case XK_Tab:
-        case XK_ISO_Left_Tab: return Key::Tab;
-        case XK_space:     return Key::Space;
-        case XK_Left:
-        case XK_KP_Left:   return Key::Left;
-        case XK_Right:
-        case XK_KP_Right:  return Key::Right;
-        case XK_Home:
-        case XK_KP_Home:   return Key::Home;
-        case XK_End:
-        case XK_KP_End:    return Key::End;
-        case XK_Up:
-        case XK_KP_Up:     return Key::Up;
-        case XK_Down:
-        case XK_KP_Down:   return Key::Down;
-        case XK_Page_Up:
-        case XK_KP_Page_Up: return Key::PageUp;
-        case XK_Page_Down:
-        case XK_KP_Page_Down: return Key::PageDown;
-        case XK_a: case XK_A: return Key::A;
-        case XK_c: case XK_C: return Key::C;
-        case XK_d: case XK_D: return Key::D;
-        case XK_f: case XK_F: return Key::F;
-        case XK_g: case XK_G: return Key::G;
-        case XK_h: case XK_H: return Key::H;
-        case XK_k: case XK_K: return Key::K;
-        case XK_v: case XK_V: return Key::V;
-        case XK_x: case XK_X: return Key::X;
-        case XK_y: case XK_Y: return Key::Y;
-        case XK_z: case XK_Z: return Key::Z;
-        case XK_slash: case XK_KP_Divide: return Key::Slash;
-        case XK_plus: case XK_equal: case XK_KP_Add: return Key::Plus;
-        case XK_minus: case XK_KP_Subtract: return Key::Minus;
-        case XK_0: case XK_KP_0: return Key::Zero;
-        case XK_F3:  return Key::F3;
-        case XK_F5:  return Key::F5;
-        case XK_F9:  return Key::F9;
-        case XK_F10: return Key::F10;
-        case XK_F11: return Key::F11;
-        default: return Key::None;
-    }
-}
 
 [[nodiscard]] keel::u32 MapCursorShape(CursorType cursor) noexcept {
     switch (cursor) {
@@ -1094,7 +1044,7 @@ struct X11PlatformWindow::Impl {
                 ui.SetKeyModifiers(mods);
 
                 const KeySym ks = x11.LookupKeysym(&ev.xkey, 0);
-                const Key logicalKey = MapX11KeySym(ks);
+                const Key logicalKey = linux_detail::MapLinuxKeySym(keel::as<keel::u32>(ks));
                 if (logicalKey != Key::None) {
                     ui.OnKeyDown(logicalKey, mods);
                 }

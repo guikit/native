@@ -10,16 +10,14 @@
 #include "keel/time.h"
 #include "linux/linux_desktop_services.hpp"
 #include "linux/linux_egl_context.hpp"
+#include "linux/wayland_clipboard.hpp"
+#include "linux/wayland_input.hpp"
 #include "linux/wayland_protocols.hpp"
 
 #if defined(__linux__) && !defined(__ANDROID__)
 #define GUIKIT_NATIVE_COMPILE_WAYLAND 1
-#include <cerrno>
-#include <cstring>
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
-#include <sys/mman.h>
 #include <unistd.h>
 #else
 #define GUIKIT_NATIVE_COMPILE_WAYLAND 0
@@ -33,144 +31,7 @@ namespace {
 
 using namespace wl_detail;
 
-static constexpr keel::u32 kBtnLeft   = 0x110u; // BTN_LEFT
-static constexpr keel::u32 kBtnRight  = 0x111u; // BTN_RIGHT
-static constexpr keel::u32 kBtnMiddle = 0x112u; // BTN_MIDDLE
-
 static constexpr keel::u64 kFrameCallbackWatchdogMs = 120u;
-
-[[nodiscard]] Key MapXkbKeySym(keel::u32 sym) noexcept {
-    switch (sym) {
-        case 0xFF08u: return Key::Backspace; // XKB_KEY_BackSpace
-        case 0xFFFFu:
-        case 0xFF9Fu: return Key::Delete;    // Delete / KP_Delete
-        case 0xFF0Du:
-        case 0xFF8Du: return Key::Enter;     // Return / KP_Enter
-        case 0xFF1Bu: return Key::Escape;    // Escape
-        case 0xFF09u:
-        case 0xFE20u: return Key::Tab;       // Tab / ISO_Left_Tab
-        case 0x0020u: return Key::Space;
-        case 0xFF51u:
-        case 0xFF96u: return Key::Left;
-        case 0xFF53u:
-        case 0xFF98u: return Key::Right;
-        case 0xFF50u:
-        case 0xFF95u: return Key::Home;
-        case 0xFF57u:
-        case 0xFF9Cu: return Key::End;
-        case 0xFF52u:
-        case 0xFF97u: return Key::Up;
-        case 0xFF54u:
-        case 0xFF99u: return Key::Down;
-        case 0xFF55u:
-        case 0xFF9Au: return Key::PageUp;
-        case 0xFF56u:
-        case 0xFF9Bu: return Key::PageDown;
-        case 'a': case 'A': return Key::A;
-        case 'c': case 'C': return Key::C;
-        case 'd': case 'D': return Key::D;
-        case 'f': case 'F': return Key::F;
-        case 'g': case 'G': return Key::G;
-        case 'h': case 'H': return Key::H;
-        case 'k': case 'K': return Key::K;
-        case 'v': case 'V': return Key::V;
-        case 'x': case 'X': return Key::X;
-        case 'y': case 'Y': return Key::Y;
-        case 'z': case 'Z': return Key::Z;
-        case '/': case 0xFFAFu: return Key::Slash;
-        case '+': case '=': case 0xFFABu: return Key::Plus;
-        case '-': case 0xFFADu: return Key::Minus;
-        case '0': case 0xFFB0u: return Key::Zero;
-        case 0xFFC0u: return Key::F3;
-        case 0xFFC2u: return Key::F5;
-        case 0xFFC6u: return Key::F9;
-        case 0xFFC7u: return Key::F10;
-        case 0xFFC8u: return Key::F11;
-        default: return Key::None;
-    }
-}
-
-[[nodiscard]] keel::u32 MapCursorToWpShape(CursorType c) noexcept {
-    switch (c) {
-        case CursorType::Pointer:    return kWpCursorShapePointer;
-        case CursorType::Text:       return kWpCursorShapeText;
-        case CursorType::ResizeEW:   return kWpCursorShapeEwResize;
-        case CursorType::ResizeNS:   return kWpCursorShapeNsResize;
-        case CursorType::ResizeNWSE: return kWpCursorShapeNwseResize;
-        case CursorType::ResizeNESW: return kWpCursorShapeNeswResize;
-        case CursorType::Move:       return kWpCursorShapeMove;
-        case CursorType::NotAllowed: return kWpCursorShapeNotAllowed;
-        case CursorType::Default:
-        default:                     return kWpCursorShapeDefault;
-    }
-}
-
-[[nodiscard]] const char* MapCursorToLegacyName(CursorType c) noexcept {
-    switch (c) {
-        case CursorType::Pointer:    return "pointer";
-        case CursorType::Text:       return "xterm";
-        case CursorType::ResizeEW:   return "ew-resize";
-        case CursorType::ResizeNS:   return "ns-resize";
-        case CursorType::ResizeNWSE: return "nwse-resize";
-        case CursorType::ResizeNESW: return "nesw-resize";
-        case CursorType::Move:       return "grabbing";
-        case CursorType::NotAllowed: return "not-allowed";
-        case CursorType::Default:
-        default:                     return "left_ptr";
-    }
-}
-
-[[nodiscard]] bool MapHitRegionToWaylandResize(
-    WindowHitRegion reg,
-    keel::u32& outEdge,
-    keel::u32& outShape,
-    CursorType& outFallbackCursor
-) noexcept {
-    switch (reg) {
-        case WindowHitRegion::ResizeTopLeft:
-            outEdge = kXdgResizeEdgeTopLeft;
-            outShape = kWpCursorShapeNwResize;
-            outFallbackCursor = CursorType::ResizeNWSE;
-            return true;
-        case WindowHitRegion::ResizeTop:
-            outEdge = kXdgResizeEdgeTop;
-            outShape = kWpCursorShapeNResize;
-            outFallbackCursor = CursorType::ResizeNS;
-            return true;
-        case WindowHitRegion::ResizeTopRight:
-            outEdge = kXdgResizeEdgeTopRight;
-            outShape = kWpCursorShapeNeResize;
-            outFallbackCursor = CursorType::ResizeNESW;
-            return true;
-        case WindowHitRegion::ResizeRight:
-            outEdge = kXdgResizeEdgeRight;
-            outShape = kWpCursorShapeEResize;
-            outFallbackCursor = CursorType::ResizeEW;
-            return true;
-        case WindowHitRegion::ResizeBottomRight:
-            outEdge = kXdgResizeEdgeBottomRight;
-            outShape = kWpCursorShapeSeResize;
-            outFallbackCursor = CursorType::ResizeNWSE;
-            return true;
-        case WindowHitRegion::ResizeBottom:
-            outEdge = kXdgResizeEdgeBottom;
-            outShape = kWpCursorShapeSResize;
-            outFallbackCursor = CursorType::ResizeNS;
-            return true;
-        case WindowHitRegion::ResizeBottomLeft:
-            outEdge = kXdgResizeEdgeBottomLeft;
-            outShape = kWpCursorShapeSwResize;
-            outFallbackCursor = CursorType::ResizeNESW;
-            return true;
-        case WindowHitRegion::ResizeLeft:
-            outEdge = kXdgResizeEdgeLeft;
-            outShape = kWpCursorShapeWResize;
-            outFallbackCursor = CursorType::ResizeEW;
-            return true;
-        default:
-            return false;
-    }
-}
 
 struct OutputInfo {
     wl_output* proxy{nullptr};
@@ -181,36 +42,21 @@ struct OutputInfo {
     bool surfaceEntered{false};
 };
 
-struct DataOfferEntry {
-    wl_data_offer* offer{nullptr};
-    bool hasUtf8Mime{false};
-    bool hasUtf8String{false};
-    bool hasPlainText{false};
-};
-
 } // namespace
 
 struct WaylandPlatformWindow::Impl {
     WaylandClientApi wl{};
     WaylandEglApi wlEgl{};
-    WaylandCursorApi wlCursor{};
-    XkbApi xkb{};
     WaylandExtInterfaces ext{};
     linux_detail::LinuxEglContext egl{};
+    WaylandClipboard clipboard{};
+    WaylandInput input{};
 
     wl_display* display{nullptr};
     wl_registry* registry{nullptr};
     wl_compositor* compositor{nullptr};
     wl_shm* shm{nullptr};
-    wl_seat* seat{nullptr};
-    wl_pointer* pointer{nullptr};
-    wl_keyboard* keyboard{nullptr};
     wl_data_device_manager* dataDeviceMgr{nullptr};
-    wl_data_device* dataDevice{nullptr};
-    wl_data_source* ourDataSource{nullptr};
-    wl_data_offer* selectionOffer{nullptr};
-    keel::String selectionMime{};
-    keel::Array<DataOfferEntry> pendingOffers{};
     keel::Array<OutputInfo> outputs{};
 
     xdg_wm_base* xdgWmBase{nullptr};
@@ -225,28 +71,12 @@ struct WaylandPlatformWindow::Impl {
     zxdg_toplevel_decoration_v1* toplevelDeco{nullptr};
     wp_viewport* viewport{nullptr};
     wp_fractional_scale_v1* fracScale{nullptr};
-    wp_cursor_shape_device_v1* cursorShapeDev{nullptr};
     wl_egl_window* eglWindow{nullptr};
-
-    // Legacy cursor fallback when wp_cursor_shape_manager_v1 is unavailable
-    wl_surface* cursorSurface{nullptr};
-    wl_cursor_theme* cursorTheme{nullptr};
-    keel::i32 cursorThemeScale{0};
 
     // Frame callback VSync pacing
     wl_callback* frameCallback{nullptr};
     bool frameCallbackPending{false};
     keel::u64 frameSubmittedMs{0u};
-
-    // XKB keyboard state & client-side key repeat
-    xkb_context* xkbCtx{nullptr};
-    xkb_keymap* xkbKeymap{nullptr};
-    xkb_state* xkbState{nullptr};
-    KeyModifiers keyMods{};
-    keel::i32 repeatRate{25};
-    keel::i32 repeatDelayMs{400};
-    keel::u32 repeatingKeycode{0u};
-    keel::u64 nextRepeatMs{0u};
 
     // Surface geometry, scale & atomic configure state
     keel::i32 logicalWidth{1380};
@@ -287,58 +117,77 @@ struct WaylandPlatformWindow::Impl {
     bool closeRequested{false};
     bool alive{false};
 
-    // Pointer & cursor state
-    bool pointerOnSurface{false};
-    Vec2 pointerLogicalPos{0.0f, 0.0f};
-    keel::u32 lastPointerEnterSerial{0u};
-    keel::u32 lastPointerSerial{0u};
-    keel::u32 lastInputSerial{0u};
-    CursorType activeCursor{CursorType::Default};
-    bool resizeCursorOverride{false};
-    keel::u32 resizeOverrideShape{kWpCursorShapeDefault};
-    CursorType resizeOverrideFallback{CursorType::Default};
-
-    // Pending wheel accumulation flushed on wl_pointer.frame
-    keel::f32 pendingWheelX{0.0f};
-    keel::f32 pendingWheelY{0.0f};
-    bool hasDiscreteWheelX{false};
-    bool hasDiscreteWheelY{false};
-
     keel::i32 wakeFd{-1};
     Context* activeUi{nullptr};
     WindowHostCallbacks callbacks{};
-    keel::String clipboardText{};
-    bool clipboardOwnedLocally{false};
 
     // --- Listeners (static C callbacks) ---
     static const wl_registry_listener kRegistryListener;
     static const wl_callback_listener kFrameCallbackListener;
     static const wl_surface_listener kSurfaceListener;
-    static const wl_seat_listener kSeatListener;
-    static const wl_pointer_listener kPointerListener;
-    static const wl_keyboard_listener kKeyboardListener;
     static const wl_output_listener kOutputListener;
-    static const wl_data_device_listener kDataDeviceListener;
-    static const wl_data_source_listener kDataSourceListener;
-    static const wl_data_offer_listener kDataOfferListener;
     static const xdg_wm_base_listener kXdgWmBaseListener;
     static const xdg_surface_listener kXdgSurfaceListener;
     static const xdg_toplevel_listener kXdgToplevelListener;
     static const zxdg_toplevel_decoration_v1_listener kDecoListener;
     static const wp_fractional_scale_v1_listener kFracScaleListener;
 
-    void DestroyOffer(wl_data_offer* offer) noexcept {
-        if (!offer) return;
-        wl.MarshalDestroy(offer, kWlDataOfferDestroy);
+    [[nodiscard]] WaylandInputHost BuildInputHost() noexcept {
+        WaylandInputHost host{};
+        host.wl = &wl;
+        host.ext = &ext;
+        host.display = display;
+        host.compositor = compositor;
+        host.shm = shm;
+        host.mainSurface = surface;
+        host.cursorShapeMgr = cursorShapeMgr;
+        host.ui = activeUi;
+        host.dpiScale = &dpiScale;
+        host.customTitleBar = &customTitleBar;
+        host.userData = this;
+        host.hitTest = &Impl::OnInputHitTest;
+        host.startResize = &Impl::OnInputStartResize;
+        host.setFocused = &Impl::OnInputSetFocused;
+        return host;
     }
 
-    void ClearPendingOffers() noexcept {
-        for (const DataOfferEntry& e : pendingOffers) {
-            if (e.offer && e.offer != selectionOffer) {
-                DestroyOffer(e.offer);
-            }
+    void SyncInputHost() noexcept {
+        input.UpdateHost(BuildInputHost());
+    }
+
+    void StartResizeWithSerial(keel::u32 serial, keel::u32 wlEdge) noexcept {
+        wl_seat* seat = input.GetSeat();
+        if (!xdgToplevel || !seat || serial == 0u) return;
+        wl_argument args[3]{};
+        args[0].o = reinterpret_cast<wl_object*>(seat);
+        args[1].u = serial;
+        args[2].u = wlEdge;
+        wl.MarshalVoid(xdgToplevel, kXdgToplevelResize, args);
+        if (display) {
+            (void)wl.DisplayFlush(display);
         }
-        pendingOffers.clear();
+    }
+
+    static WindowHitRegion OnInputHitTest(void* userData, Vec2 logicalPos) {
+        auto* self = static_cast<Impl*>(userData);
+        if (!self || !self->callbacks.onHitTest) {
+            return WindowHitRegion::Client;
+        }
+        return self->callbacks.onHitTest(logicalPos);
+    }
+
+    static void OnInputStartResize(void* userData, keel::u32 serial, keel::u32 xdgEdge) {
+        auto* self = static_cast<Impl*>(userData);
+        if (self) {
+            self->StartResizeWithSerial(serial, xdgEdge);
+        }
+    }
+
+    static void OnInputSetFocused(void* userData, bool isFocused) {
+        auto* self = static_cast<Impl*>(userData);
+        if (self) {
+            self->focused = isFocused;
+        }
     }
 
     void DestroyAll() noexcept {
@@ -357,18 +206,6 @@ struct WaylandPlatformWindow::Impl {
             eglWindow = nullptr;
         }
 
-        if (cursorTheme && wlCursor.ThemeDestroy) {
-            wlCursor.ThemeDestroy(cursorTheme);
-            cursorTheme = nullptr;
-        }
-        if (cursorSurface) {
-            wl.MarshalDestroy(cursorSurface, kWlSurfaceDestroy);
-            cursorSurface = nullptr;
-        }
-        if (cursorShapeDev) {
-            wl.MarshalDestroy(cursorShapeDev, kWpCursorShapeDevDestroy);
-            cursorShapeDev = nullptr;
-        }
         if (fracScale) {
             wl.MarshalDestroy(fracScale, kWpFracScaleDestroy);
             fracScale = nullptr;
@@ -394,47 +231,10 @@ struct WaylandPlatformWindow::Impl {
             surface = nullptr;
         }
 
-        ClearPendingOffers();
-        if (selectionOffer) {
-            DestroyOffer(selectionOffer);
-            selectionOffer = nullptr;
-        }
-        if (ourDataSource) {
-            wl.MarshalDestroy(ourDataSource, kWlDataSourceDestroy);
-            ourDataSource = nullptr;
-        }
-        if (dataDevice) {
-            if (wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(dataDevice)) >= 2u) {
-                wl.MarshalDestroy(dataDevice, kWlDataDeviceRelease);
-            } else {
-                wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(dataDevice));
-            }
-            dataDevice = nullptr;
-        }
-        if (keyboard) {
-            if (wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(keyboard)) >= 3u) {
-                wl.MarshalDestroy(keyboard, kWlKeyboardRelease);
-            } else {
-                wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(keyboard));
-            }
-            keyboard = nullptr;
-        }
-        if (pointer) {
-            if (wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(pointer)) >= 3u) {
-                wl.MarshalDestroy(pointer, kWlPointerRelease);
-            } else {
-                wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(pointer));
-            }
-            pointer = nullptr;
-        }
-        if (seat) {
-            if (wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(seat)) >= 5u) {
-                wl.MarshalDestroy(seat, kWlSeatRelease);
-            } else {
-                wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(seat));
-            }
-            seat = nullptr;
-        }
+        // Destroy clipboard before seat & data_device_manager; destroy input before globals & display
+        clipboard.Destroy();
+        input.Destroy();
+
         for (OutputInfo& out : outputs) {
             if (out.proxy) {
                 if (wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(out.proxy)) >= 3u) {
@@ -486,19 +286,6 @@ struct WaylandPlatformWindow::Impl {
         if (display && wl.DisplayDisconnect) {
             wl.DisplayDisconnect(display);
             display = nullptr;
-        }
-
-        if (xkbState && xkb.StateUnref) {
-            xkb.StateUnref(xkbState);
-            xkbState = nullptr;
-        }
-        if (xkbKeymap && xkb.KeymapUnref) {
-            xkb.KeymapUnref(xkbKeymap);
-            xkbKeymap = nullptr;
-        }
-        if (xkbCtx && xkb.ContextUnref) {
-            xkb.ContextUnref(xkbCtx);
-            xkbCtx = nullptr;
         }
 
         if (wakeFd >= 0) {
@@ -669,176 +456,6 @@ struct WaylandPlatformWindow::Impl {
         }
     }
 
-    void ApplyCurrentCursor() noexcept {
-        if (!pointer || !pointerOnSurface) return;
-
-        if (cursorShapeDev) {
-            const keel::u32 shape = resizeCursorOverride
-                ? resizeOverrideShape
-                : MapCursorToWpShape(activeCursor);
-            wl_argument args[2]{};
-            args[0].u = lastPointerEnterSerial;
-            args[1].u = shape;
-            wl.MarshalVoid(cursorShapeDev, kWpCursorShapeDevSetShape, args);
-            return;
-        }
-
-        // Legacy wl_cursor fallback for compositors without wp-cursor-shape-v1
-        if (!shm || !compositor) return;
-        if (!wlCursor.lib.is_open() && !wlCursor.Load()) return;
-        const keel::i32 curScale = keel::max(1, keel::round_i32(dpiScale));
-        if (!cursorTheme || cursorThemeScale != curScale) {
-            if (cursorTheme) {
-                wlCursor.ThemeDestroy(cursorTheme);
-                cursorTheme = nullptr;
-            }
-            cursorTheme = wlCursor.ThemeLoad(nullptr, 24 * curScale, shm);
-            cursorThemeScale = curScale;
-        }
-        if (!cursorTheme) return;
-        if (!cursorSurface) {
-            wl_argument createArg[1]{};
-            cursorSurface = wl.MarshalNew<wl_surface>(compositor, kWlCompositorCreateSurface, wl.ifaceSurface, createArg);
-        }
-        if (!cursorSurface) return;
-
-        const CursorType effCursor = resizeCursorOverride ? resizeOverrideFallback : activeCursor;
-        wl_cursor* cur = wlCursor.ThemeGetCursor(cursorTheme, MapCursorToLegacyName(effCursor));
-        if (!cur) cur = wlCursor.ThemeGetCursor(cursorTheme, "left_ptr");
-        if (!cur || cur->image_count == 0u || !cur->images || !cur->images[0]) return;
-
-        wl_cursor_image* img = cur->images[0];
-        wl_buffer* buf = wlCursor.ImageGetBuffer(img);
-        if (!buf) return;
-
-        if (wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(cursorSurface)) >= 3u) {
-            wl_argument sArg[1]{};
-            sArg[0].i = curScale;
-            wl.MarshalVoid(cursorSurface, kWlSurfaceSetBufferScale, sArg);
-        }
-        wl_argument attachArgs[3]{};
-        attachArgs[0].o = reinterpret_cast<wl_object*>(buf);
-        attachArgs[1].i = 0;
-        attachArgs[2].i = 0;
-        wl.MarshalVoid(cursorSurface, kWlSurfaceAttach, attachArgs);
-        wl_argument dmgArgs[4]{};
-        dmgArgs[0].i = 0;
-        dmgArgs[1].i = 0;
-        dmgArgs[2].i = keel::as<keel::i32>(img->width);
-        dmgArgs[3].i = keel::as<keel::i32>(img->height);
-        wl.MarshalVoid(cursorSurface, kWlSurfaceDamage, dmgArgs);
-        wl.MarshalVoid(cursorSurface, kWlSurfaceCommit);
-
-        wl_argument setCurArgs[4]{};
-        setCurArgs[0].u = lastPointerEnterSerial;
-        setCurArgs[1].o = reinterpret_cast<wl_object*>(cursorSurface);
-        setCurArgs[2].i = keel::as<keel::i32>(img->hotspot_x) / curScale;
-        setCurArgs[3].i = keel::as<keel::i32>(img->hotspot_y) / curScale;
-        wl.MarshalVoid(pointer, kWlPointerSetCursor, setCurArgs);
-    }
-
-    void DispatchXkbKey(keel::u32 xkbKeycode, Context& ui) noexcept {
-        if (!xkbState) return;
-        const keel::u32 sym = xkb.StateKeyGetOneSym(xkbState, xkbKeycode);
-        const Key logicalKey = MapXkbKeySym(sym);
-        if (logicalKey != Key::None) {
-            ui.OnKeyDown(logicalKey, keyMods);
-        }
-        if (!keyMods.ctrl && !keyMods.alt) {
-            char utf8Buf[64]{};
-            const keel::i32 len = xkb.StateKeyGetUtf8(xkbState, xkbKeycode, utf8Buf, sizeof(utf8Buf) - 1u);
-            if (len > 0) {
-                const auto first = keel::as<keel::u8>(utf8Buf[0]);
-                if (first >= 0x20u && first != 0x7Fu) {
-                    ui.OnTextInput(keel::StringRef(utf8Buf, keel::as<keel::usize>(len)));
-                }
-            }
-        }
-    }
-
-    void SetSystemClipboard(keel::StringRef text) {
-        clipboardText = keel::String::from(text);
-        clipboardOwnedLocally = true;
-        if (!dataDeviceMgr || !dataDevice || lastInputSerial == 0u) {
-            return;
-        }
-        if (ourDataSource) {
-            wl.MarshalDestroy(ourDataSource, kWlDataSourceDestroy);
-            ourDataSource = nullptr;
-        }
-        wl_argument createArg[1]{};
-        ourDataSource = wl.MarshalNew<wl_data_source>(
-            dataDeviceMgr,
-            kWlDataDevMgrCreateSource,
-            wl.ifaceDataSource,
-            createArg
-        );
-        if (!ourDataSource) return;
-
-        wl.AddListener(ourDataSource, &kDataSourceListener, this);
-        static constexpr const char* kMimes[3] = {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain"};
-        for (const char* mime : kMimes) {
-            wl_argument offerArg[1]{};
-            offerArg[0].s = mime;
-            wl.MarshalVoid(ourDataSource, kWlDataSourceOffer, offerArg);
-        }
-
-        wl_argument selArgs[2]{};
-        selArgs[0].o = reinterpret_cast<wl_object*>(ourDataSource);
-        selArgs[1].u = lastInputSerial;
-        wl.MarshalVoid(dataDevice, kWlDataDeviceSetSelection, selArgs);
-        (void)wl.DisplayFlush(display);
-    }
-
-    [[nodiscard]] keel::String GetSystemClipboard() {
-        if (ourDataSource != nullptr || clipboardOwnedLocally) {
-            return clipboardText.clone();
-        }
-        if (!selectionOffer || selectionMime.empty() || !display) {
-            return {};
-        }
-
-        int pipeFds[2]{-1, -1}; // keel-lint: ignore
-        if (::pipe(pipeFds) != 0) {
-            return {};
-        }
-        const int flags = ::fcntl(pipeFds[0], F_GETFL, 0); // keel-lint: ignore
-        if (flags >= 0) {
-            (void)::fcntl(pipeFds[0], F_SETFL, flags | O_NONBLOCK);
-        }
-
-        wl_argument recvArgs[2]{};
-        recvArgs[0].s = selectionMime.c_str();
-        recvArgs[1].h = pipeFds[1];
-        wl.MarshalVoid(selectionOffer, kWlDataOfferReceive, recvArgs);
-        ::close(pipeFds[1]);
-        (void)wl.DisplayFlush(display);
-
-        keel::String result{};
-        const keel::u64 deadlineMs = keel::monotonic_ms() + 150u;
-        char buf[1024]{};
-        for (;;) {
-            const keel::u64 now = keel::monotonic_ms();
-            if (now >= deadlineMs) break;
-            struct pollfd pfd{};
-            pfd.fd = pipeFds[0];
-            pfd.events = POLLIN;
-            const keel::i32 rc = ::poll(&pfd, 1, keel::as<keel::i32>(deadlineMs - now));
-            if (rc <= 0) break;
-            const keel::isize n = ::read(pipeFds[0], buf, sizeof(buf));
-            if (n > 0) {
-                result.append(keel::StringRef(buf, keel::as<keel::usize>(n)));
-                if (result.size() >= 1024u * 1024u) break;
-            } else if (n == 0) {
-                break;
-            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                break;
-            }
-        }
-        ::close(pipeFds[0]);
-        return result;
-    }
-
     // --- Static Wayland callback handlers ---
 
     static void OnRegistryGlobal(void* data, wl_registry* reg, keel::u32 name, const char* iface, keel::u32 version) {
@@ -858,12 +475,14 @@ struct WaylandPlatformWindow::Impl {
 
         if (s == "wl_compositor" && !self->compositor) {
             self->compositor = static_cast<wl_compositor*>(bindGlobal(self->wl.ifaceCompositor, 6u));
+            self->SyncInputHost();
         } else if (s == "wl_shm" && !self->shm && self->wl.ifaceShm) {
             self->shm = static_cast<wl_shm*>(bindGlobal(self->wl.ifaceShm, 1u));
-        } else if (s == "wl_seat" && !self->seat) {
-            self->seat = static_cast<wl_seat*>(bindGlobal(self->wl.ifaceSeat, 8u));
-            if (self->seat) {
-                self->wl.AddListener(self->seat, &kSeatListener, self);
+            self->SyncInputHost();
+        } else if (s == "wl_seat" && !self->input.GetSeat()) {
+            auto* seat = static_cast<wl_seat*>(bindGlobal(self->wl.ifaceSeat, 8u));
+            if (seat) {
+                self->input.BindSeat(seat);
             }
         } else if (s == "wl_output") {
             auto* out = static_cast<wl_output*>(bindGlobal(self->wl.ifaceOutput, 4u));
@@ -889,6 +508,7 @@ struct WaylandPlatformWindow::Impl {
             self->fracScaleMgr = static_cast<wp_fractional_scale_manager_v1*>(bindGlobal(&self->ext.fracScaleManager, 1u));
         } else if (s == "wp_cursor_shape_manager_v1" && !self->cursorShapeMgr) {
             self->cursorShapeMgr = static_cast<wp_cursor_shape_manager_v1*>(bindGlobal(&self->ext.curShapeManager, 1u));
+            self->SyncInputHost();
         }
     }
 
@@ -958,329 +578,6 @@ struct WaylandPlatformWindow::Impl {
 
     static void OnSurfacePreferredBufferTransform(void*, wl_surface*, keel::u32) {}
 
-    static void OnSeatCapabilities(void* data, wl_seat* seat, keel::u32 caps) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-
-        const bool hasPtr = (caps & kWlSeatCapPointer) != 0u;
-        if (hasPtr && !self->pointer) {
-            wl_argument arg[1]{};
-            self->pointer = self->wl.MarshalNew<wl_pointer>(seat, kWlSeatGetPointer, self->wl.ifacePointer, arg);
-            if (self->pointer) {
-                self->wl.AddListener(self->pointer, &kPointerListener, self);
-                if (self->cursorShapeMgr && !self->cursorShapeDev) {
-                    wl_argument csArgs[2]{};
-                    csArgs[0].o = nullptr;
-                    csArgs[1].o = reinterpret_cast<wl_object*>(self->pointer);
-                    self->cursorShapeDev = self->wl.MarshalNew<wp_cursor_shape_device_v1>(
-                        self->cursorShapeMgr,
-                        kWpCursorShapeMgrGetPointer,
-                        &self->ext.curShapeDevice,
-                        csArgs
-                    );
-                }
-            }
-        } else if (!hasPtr && self->pointer) {
-            if (self->cursorShapeDev) {
-                self->wl.MarshalDestroy(self->cursorShapeDev, kWpCursorShapeDevDestroy);
-                self->cursorShapeDev = nullptr;
-            }
-            if (self->wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(self->pointer)) >= 3u) {
-                self->wl.MarshalDestroy(self->pointer, kWlPointerRelease);
-            } else {
-                self->wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(self->pointer));
-            }
-            self->pointer = nullptr;
-        }
-
-        const bool hasKbd = (caps & kWlSeatCapKeyboard) != 0u;
-        if (hasKbd && !self->keyboard) {
-            wl_argument arg[1]{};
-            self->keyboard = self->wl.MarshalNew<wl_keyboard>(seat, kWlSeatGetKeyboard, self->wl.ifaceKeyboard, arg);
-            if (self->keyboard) {
-                self->wl.AddListener(self->keyboard, &kKeyboardListener, self);
-            }
-        } else if (!hasKbd && self->keyboard) {
-            if (self->wl.ProxyGetVersion(reinterpret_cast<wl_proxy*>(self->keyboard)) >= 3u) {
-                self->wl.MarshalDestroy(self->keyboard, kWlKeyboardRelease);
-            } else {
-                self->wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(self->keyboard));
-            }
-            self->keyboard = nullptr;
-        }
-    }
-
-    static void OnSeatName(void*, wl_seat*, const char*) {}
-
-    static void OnPointerEnter(void* data, wl_pointer*, keel::u32 serial, wl_surface* surf, WlFixed sx, WlFixed sy) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->lastPointerEnterSerial = serial;
-        self->lastPointerSerial = serial;
-        self->lastInputSerial = serial;
-        self->pointerOnSurface = (surf == self->surface);
-        if (!self->pointerOnSurface) return;
-        self->pointerLogicalPos = {WlFixedToFloat(sx), WlFixedToFloat(sy)};
-        self->ApplyCurrentCursor();
-        if (self->activeUi) {
-            self->activeUi->OnMouseMove({self->pointerLogicalPos.x * self->dpiScale, self->pointerLogicalPos.y * self->dpiScale});
-        }
-    }
-
-    static void OnPointerLeave(void* data, wl_pointer*, keel::u32 serial, wl_surface* surf) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->lastPointerSerial = serial;
-        if (surf == self->surface) {
-            self->pointerOnSurface = false;
-            self->resizeCursorOverride = false;
-        }
-    }
-
-    static void OnPointerMotion(void* data, wl_pointer*, keel::u32, WlFixed sx, WlFixed sy) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !self->pointerOnSurface) return;
-        self->pointerLogicalPos = {WlFixedToFloat(sx), WlFixedToFloat(sy)};
-        if (self->customTitleBar && self->callbacks.onHitTest) {
-            const WindowHitRegion reg = self->callbacks.onHitTest(self->pointerLogicalPos);
-            keel::u32 edge = 0u;
-            keel::u32 shape = kWpCursorShapeDefault;
-            CursorType fallbackCur = CursorType::Default;
-            if (MapHitRegionToWaylandResize(reg, edge, shape, fallbackCur)) {
-                const bool changed = !self->resizeCursorOverride || self->resizeOverrideShape != shape;
-                self->resizeCursorOverride = true;
-                self->resizeOverrideShape = shape;
-                self->resizeOverrideFallback = fallbackCur;
-                if (changed) {
-                    self->ApplyCurrentCursor();
-                }
-            } else if (self->resizeCursorOverride) {
-                self->resizeCursorOverride = false;
-                self->ApplyCurrentCursor();
-            }
-        }
-        if (self->activeUi) {
-            self->activeUi->OnMouseMove({self->pointerLogicalPos.x * self->dpiScale, self->pointerLogicalPos.y * self->dpiScale});
-        }
-    }
-
-    static void OnPointerButton(void* data, wl_pointer*, keel::u32 serial, keel::u32, keel::u32 button, keel::u32 state) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !self->pointerOnSurface) return;
-        self->lastPointerSerial = serial;
-        self->lastInputSerial = serial;
-
-        if (button == kBtnLeft && state == kWlPointerButtonPressed && self->customTitleBar && self->callbacks.onHitTest) {
-            const WindowHitRegion reg = self->callbacks.onHitTest(self->pointerLogicalPos);
-            keel::u32 edge = 0u;
-            keel::u32 shape = 0u;
-            CursorType fallbackCur = CursorType::Default;
-            if (MapHitRegionToWaylandResize(reg, edge, shape, fallbackCur)) {
-                if (self->xdgToplevel && self->seat) {
-                    wl_argument args[3]{};
-                    args[0].o = reinterpret_cast<wl_object*>(self->seat);
-                    args[1].u = serial;
-                    args[2].u = edge;
-                    self->wl.MarshalVoid(self->xdgToplevel, kXdgToplevelResize, args);
-                    (void)self->wl.DisplayFlush(self->display);
-                }
-                return;
-            }
-        }
-
-        if (!self->activeUi) return;
-        self->activeUi->OnMouseMove({self->pointerLogicalPos.x * self->dpiScale, self->pointerLogicalPos.y * self->dpiScale});
-        keel::i32 uiBtn = 0;
-        if (button == kBtnLeft) uiBtn = 1;
-        else if (button == kBtnMiddle) uiBtn = 2;
-        else if (button == kBtnRight) uiBtn = 3;
-        if (uiBtn == 0) return;
-        if (state == kWlPointerButtonPressed) {
-            self->activeUi->OnMouseDown(uiBtn);
-        } else if (state == kWlPointerButtonReleased) {
-            self->activeUi->OnMouseUp(uiBtn);
-        }
-    }
-
-    static void OnPointerAxis(void* data, wl_pointer*, keel::u32, keel::u32 axis, WlFixed value) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !self->pointerOnSurface) return;
-        const keel::f32 v = WlFixedToFloat(value);
-        if (axis == kWlPointerAxisVertical) {
-            if (!self->hasDiscreteWheelY) {
-                self->pendingWheelY -= v / 15.0f;
-            }
-        } else if (axis == kWlPointerAxisHorizontal) {
-            if (!self->hasDiscreteWheelX) {
-                self->pendingWheelX -= v / 15.0f;
-            }
-        }
-    }
-
-    static void OnPointerFrame(void* data, wl_pointer*) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        if (self->activeUi && (keel::abs(self->pendingWheelX) > 1e-4f || keel::abs(self->pendingWheelY) > 1e-4f)) {
-            self->activeUi->OnMouseWheel(self->pendingWheelX, self->pendingWheelY);
-        }
-        self->pendingWheelX = 0.0f;
-        self->pendingWheelY = 0.0f;
-        self->hasDiscreteWheelX = false;
-        self->hasDiscreteWheelY = false;
-    }
-
-    static void OnPointerAxisSource(void*, wl_pointer*, keel::u32) {}
-    static void OnPointerAxisStop(void*, wl_pointer*, keel::u32, keel::u32) {}
-
-    static void OnPointerAxisDiscrete(void* data, wl_pointer*, keel::u32 axis, keel::i32 discrete) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !self->pointerOnSurface) return;
-        if (axis == kWlPointerAxisVertical) {
-            if (!self->hasDiscreteWheelY) {
-                self->pendingWheelY = 0.0f;
-                self->hasDiscreteWheelY = true;
-            }
-            self->pendingWheelY -= keel::as<keel::f32>(discrete);
-        } else if (axis == kWlPointerAxisHorizontal) {
-            if (!self->hasDiscreteWheelX) {
-                self->pendingWheelX = 0.0f;
-                self->hasDiscreteWheelX = true;
-            }
-            self->pendingWheelX -= keel::as<keel::f32>(discrete);
-        }
-    }
-
-    static void OnPointerAxisValue120(void* data, wl_pointer*, keel::u32 axis, keel::i32 value120) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !self->pointerOnSurface) return;
-        if (axis == kWlPointerAxisVertical) {
-            if (!self->hasDiscreteWheelY) {
-                self->pendingWheelY = 0.0f;
-                self->hasDiscreteWheelY = true;
-            }
-            self->pendingWheelY -= keel::as<keel::f32>(value120) / 120.0f;
-        } else if (axis == kWlPointerAxisHorizontal) {
-            if (!self->hasDiscreteWheelX) {
-                self->pendingWheelX = 0.0f;
-                self->hasDiscreteWheelX = true;
-            }
-            self->pendingWheelX -= keel::as<keel::f32>(value120) / 120.0f;
-        }
-    }
-
-    static void OnPointerAxisRelativeDirection(void*, wl_pointer*, keel::u32, keel::u32) {}
-
-    static void OnKeyboardKeymap(void* data, wl_keyboard*, keel::u32 format, keel::i32 fd, keel::u32 size) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) {
-            if (fd >= 0) ::close(fd);
-            return;
-        }
-        if (format != kWlKeyboardKeymapXkbV1 || fd < 0 || size == 0u || !self->xkbCtx) {
-            if (fd >= 0) ::close(fd);
-            return;
-        }
-        void* mapped = ::mmap(nullptr, keel::as<keel::usize>(size), PROT_READ, MAP_PRIVATE, fd, 0);
-        ::close(fd);
-        if (mapped == MAP_FAILED || !mapped) {
-            return;
-        }
-
-        xkb_keymap* km = self->xkb.KeymapNewFromString(
-            self->xkbCtx,
-            static_cast<const char*>(mapped),
-            XkbApi::kKeymapFormatTextV1,
-            XkbApi::kKeymapCompileNoFlags
-        );
-        (void)::munmap(mapped, keel::as<keel::usize>(size));
-        if (!km) return;
-
-        xkb_state* st = self->xkb.StateNew(km);
-        if (!st) {
-            self->xkb.KeymapUnref(km);
-            return;
-        }
-        if (self->xkbState) self->xkb.StateUnref(self->xkbState);
-        if (self->xkbKeymap) self->xkb.KeymapUnref(self->xkbKeymap);
-        self->xkbKeymap = km;
-        self->xkbState = st;
-    }
-
-    static void OnKeyboardEnter(void* data, wl_keyboard*, keel::u32 serial, wl_surface*, wl_array*) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->lastInputSerial = serial;
-        self->focused = true;
-        if (self->activeUi) {
-            self->activeUi->InvalidateAll();
-            self->activeUi->RequestRepaint(2);
-        }
-    }
-
-    static void OnKeyboardLeave(void* data, wl_keyboard*, keel::u32 serial, wl_surface*) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->lastInputSerial = serial;
-        self->repeatingKeycode = 0u;
-        self->keyMods = {};
-        if (self->activeUi) {
-            self->activeUi->SetKeyModifiers({});
-            self->activeUi->InvalidateAll();
-            self->activeUi->RequestRepaint(2);
-        }
-    }
-
-    static void OnKeyboardKey(void* data, wl_keyboard*, keel::u32 serial, keel::u32, keel::u32 key, keel::u32 state) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->lastInputSerial = serial;
-        const keel::u32 xkbKeycode = key + 8u;
-        if (state == kWlKeyboardKeyPressed) {
-            if (self->activeUi) {
-                self->DispatchXkbKey(xkbKeycode, *self->activeUi);
-            }
-            if (self->repeatRate > 0 && self->xkbKeymap &&
-                (!self->xkb.KeymapKeyRepeats || self->xkb.KeymapKeyRepeats(self->xkbKeymap, xkbKeycode) != 0)) {
-                self->repeatingKeycode = xkbKeycode;
-                self->nextRepeatMs = keel::monotonic_ms() + keel::as<keel::u64>(keel::max(100, self->repeatDelayMs));
-            }
-        } else if (state == kWlKeyboardKeyReleased) {
-            if (self->repeatingKeycode == xkbKeycode) {
-                self->repeatingKeycode = 0u;
-            }
-        }
-    }
-
-    static void OnKeyboardModifiers(
-        void* data,
-        wl_keyboard*,
-        keel::u32 serial,
-        keel::u32 depressed,
-        keel::u32 latched,
-        keel::u32 locked,
-        keel::u32 group
-    ) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->lastInputSerial = serial;
-        if (self->xkbState) {
-            (void)self->xkb.StateUpdateMask(self->xkbState, depressed, latched, locked, 0u, 0u, group);
-            self->keyMods.shift = self->xkb.StateModNameIsActive(self->xkbState, "Shift", XkbApi::kStateModsEffective) > 0;
-            self->keyMods.ctrl = self->xkb.StateModNameIsActive(self->xkbState, "Control", XkbApi::kStateModsEffective) > 0;
-            self->keyMods.alt = self->xkb.StateModNameIsActive(self->xkbState, "Mod1", XkbApi::kStateModsEffective) > 0;
-            if (self->activeUi) {
-                self->activeUi->SetKeyModifiers(self->keyMods);
-            }
-        }
-    }
-
-    static void OnKeyboardRepeatInfo(void* data, wl_keyboard*, keel::i32 rate, keel::i32 delay) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        self->repeatRate = keel::max(0, rate);
-        self->repeatDelayMs = keel::max(50, delay);
-    }
-
     static void OnOutputGeometry(
         void* data,
         wl_output* output,
@@ -1335,99 +632,6 @@ struct WaylandPlatformWindow::Impl {
 
     static void OnOutputName(void*, wl_output*, const char*) {}
     static void OnOutputDescription(void*, wl_output*, const char*) {}
-
-    static void OnDataDeviceOffer(void* data, wl_data_device*, wl_data_offer* offer) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !offer) return;
-        DataOfferEntry entry{};
-        entry.offer = offer;
-        self->pendingOffers.push_back(entry);
-        self->wl.AddListener(offer, &kDataOfferListener, self);
-    }
-
-    static void OnDataDeviceEnter(void*, wl_data_device*, keel::u32, wl_surface*, WlFixed, WlFixed, wl_data_offer*) {}
-    static void OnDataDeviceLeave(void*, wl_data_device*) {}
-    static void OnDataDeviceMotion(void*, wl_data_device*, keel::u32, WlFixed, WlFixed) {}
-    static void OnDataDeviceDrop(void*, wl_data_device*) {}
-
-    static void OnDataDeviceSelection(void* data, wl_data_device*, wl_data_offer* offer) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        if (self->selectionOffer && self->selectionOffer != offer) {
-            self->DestroyOffer(self->selectionOffer);
-        }
-        self->selectionOffer = offer;
-        self->selectionMime.clear();
-
-        if (offer) {
-            if (!self->ourDataSource) {
-                self->clipboardOwnedLocally = false;
-            }
-            for (keel::usize i = 0u; i < self->pendingOffers.size(); ++i) {
-                if (self->pendingOffers[i].offer == offer) {
-                    const DataOfferEntry& e = self->pendingOffers[i];
-                    if (e.hasUtf8Mime) self->selectionMime = keel::String("text/plain;charset=utf-8");
-                    else if (e.hasUtf8String) self->selectionMime = keel::String("UTF8_STRING");
-                    else if (e.hasPlainText) self->selectionMime = keel::String("text/plain");
-                    self->pendingOffers.erase(i);
-                    break;
-                }
-            }
-        }
-        self->ClearPendingOffers();
-    }
-
-    static void OnDataSourceTarget(void*, wl_data_source*, const char*) {}
-
-    static void OnDataSourceSend(void* data, wl_data_source*, const char*, keel::i32 fd) {
-        auto* self = static_cast<Impl*>(data);
-        if (fd < 0) return;
-        if (self && !self->clipboardText.empty()) {
-            const char* ptr = self->clipboardText.c_str();
-            keel::usize remaining = self->clipboardText.size();
-            while (remaining > 0u) {
-                const keel::isize written = ::write(fd, ptr, remaining);
-                if (written <= 0) {
-                    if (written < 0 && errno == EINTR) continue;
-                    break;
-                }
-                ptr += written;
-                remaining -= keel::as<keel::usize>(written);
-            }
-        }
-        ::close(fd);
-    }
-
-    static void OnDataSourceCancelled(void* data, wl_data_source* src) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self) return;
-        if (src == self->ourDataSource) {
-            self->wl.MarshalDestroy(self->ourDataSource, kWlDataSourceDestroy);
-            self->ourDataSource = nullptr;
-            self->clipboardOwnedLocally = false;
-        }
-    }
-
-    static void OnDataSourceDndDrop(void*, wl_data_source*) {}
-    static void OnDataSourceDndFinished(void*, wl_data_source*) {}
-    static void OnDataSourceAction(void*, wl_data_source*, keel::u32) {}
-
-    static void OnDataOfferMime(void* data, wl_data_offer* offer, const char* mime) {
-        auto* self = static_cast<Impl*>(data);
-        if (!self || !offer || !mime) return;
-        const keel::StringRef m(mime);
-        for (DataOfferEntry& e : self->pendingOffers) {
-            if (e.offer == offer) {
-                if (m == "text/plain;charset=utf-8") e.hasUtf8Mime = true;
-                else if (m == "UTF8_STRING") e.hasUtf8String = true;
-                else if (m == "text/plain") e.hasPlainText = true;
-                break;
-            }
-        }
-    }
-
-    static void OnDataOfferSourceActions(void*, wl_data_offer*, keel::u32) {}
-    static void OnDataOfferAction(void*, wl_data_offer*, keel::u32) {}
 
     static void OnXdgWmBasePing(void* data, xdg_wm_base* base, keel::u32 serial) {
         auto* self = static_cast<Impl*>(data);
@@ -1528,31 +732,6 @@ const wl_surface_listener WaylandPlatformWindow::Impl::kSurfaceListener = {
     &Impl::OnSurfacePreferredBufferScale,
     &Impl::OnSurfacePreferredBufferTransform
 };
-const wl_seat_listener WaylandPlatformWindow::Impl::kSeatListener = {
-    &Impl::OnSeatCapabilities,
-    &Impl::OnSeatName
-};
-const wl_pointer_listener WaylandPlatformWindow::Impl::kPointerListener = {
-    &Impl::OnPointerEnter,
-    &Impl::OnPointerLeave,
-    &Impl::OnPointerMotion,
-    &Impl::OnPointerButton,
-    &Impl::OnPointerAxis,
-    &Impl::OnPointerFrame,
-    &Impl::OnPointerAxisSource,
-    &Impl::OnPointerAxisStop,
-    &Impl::OnPointerAxisDiscrete,
-    &Impl::OnPointerAxisValue120,
-    &Impl::OnPointerAxisRelativeDirection
-};
-const wl_keyboard_listener WaylandPlatformWindow::Impl::kKeyboardListener = {
-    &Impl::OnKeyboardKeymap,
-    &Impl::OnKeyboardEnter,
-    &Impl::OnKeyboardLeave,
-    &Impl::OnKeyboardKey,
-    &Impl::OnKeyboardModifiers,
-    &Impl::OnKeyboardRepeatInfo
-};
 const wl_output_listener WaylandPlatformWindow::Impl::kOutputListener = {
     &Impl::OnOutputGeometry,
     &Impl::OnOutputMode,
@@ -1560,27 +739,6 @@ const wl_output_listener WaylandPlatformWindow::Impl::kOutputListener = {
     &Impl::OnOutputScale,
     &Impl::OnOutputName,
     &Impl::OnOutputDescription
-};
-const wl_data_device_listener WaylandPlatformWindow::Impl::kDataDeviceListener = {
-    &Impl::OnDataDeviceOffer,
-    &Impl::OnDataDeviceEnter,
-    &Impl::OnDataDeviceLeave,
-    &Impl::OnDataDeviceMotion,
-    &Impl::OnDataDeviceDrop,
-    &Impl::OnDataDeviceSelection
-};
-const wl_data_source_listener WaylandPlatformWindow::Impl::kDataSourceListener = {
-    &Impl::OnDataSourceTarget,
-    &Impl::OnDataSourceSend,
-    &Impl::OnDataSourceCancelled,
-    &Impl::OnDataSourceDndDrop,
-    &Impl::OnDataSourceDndFinished,
-    &Impl::OnDataSourceAction
-};
-const wl_data_offer_listener WaylandPlatformWindow::Impl::kDataOfferListener = {
-    &Impl::OnDataOfferMime,
-    &Impl::OnDataOfferSourceActions,
-    &Impl::OnDataOfferAction
 };
 const xdg_wm_base_listener WaylandPlatformWindow::Impl::kXdgWmBaseListener = {
     &Impl::OnXdgWmBasePing
@@ -1616,8 +774,16 @@ bool WaylandPlatformWindow::IsRuntimeAvailable() noexcept {
     }
     WaylandClientApi wl;
     WaylandEglApi wlEgl;
-    XkbApi xkb;
-    return wl.Load() && wlEgl.Load() && xkb.Load() && linux_detail::LinuxEglContext::IsRuntimeAvailable();
+    if (!wl.Load() || !wlEgl.Load() || !WaylandInput::IsXkbRuntimeAvailable() ||
+        !linux_detail::LinuxEglContext::IsRuntimeAvailable()) {
+        return false;
+    }
+    wl_display* probe = wl.DisplayConnect(nullptr);
+    if (!probe) {
+        return false;
+    }
+    wl.DisplayDisconnect(probe);
+    return true;
 }
 
 bool WaylandPlatformWindow::Create(
@@ -1628,13 +794,12 @@ bool WaylandPlatformWindow::Create(
     if (!m_impl) return false;
     m_impl->DestroyAll();
 
-    if (!m_impl->wl.Load() || !m_impl->wlEgl.Load() || !m_impl->xkb.Load()) {
-        keel::eprintln("[WaylandPlatformWindow] Failed to load Wayland/EGL/XKB shared libraries");
+    if (!m_impl->wl.Load() || !m_impl->wlEgl.Load()) {
+        keel::eprintln("[WaylandPlatformWindow] Failed to load Wayland/EGL shared libraries");
         return false;
     }
     m_impl->ext.Init(m_impl->wl);
 
-    m_impl->xkbCtx = m_impl->xkb.ContextNew(XkbApi::kContextNoFlags);
     m_impl->display = m_impl->wl.DisplayConnect(nullptr);
     if (!m_impl->display) {
         keel::eprintln("[WaylandPlatformWindow] wl_display_connect(nullptr) failed");
@@ -1659,6 +824,12 @@ bool WaylandPlatformWindow::Create(
     m_impl->callbacks = keel::move(callbacks);
     m_impl->activeUi = &ui;
 
+    if (!m_impl->input.Init(m_impl->BuildInputHost())) {
+        keel::eprintln("[WaylandPlatformWindow] Failed to initialize libxkbcommon");
+        m_impl->DestroyAll();
+        return false;
+    }
+
     // 1. Discover compositor globals
     wl_argument regArg[1]{};
     m_impl->registry = m_impl->wl.MarshalNew<wl_registry>(
@@ -1674,6 +845,7 @@ bool WaylandPlatformWindow::Create(
     }
     m_impl->wl.AddListener(m_impl->registry, &Impl::kRegistryListener, m_impl.get());
     (void)m_impl->wl.DisplayRoundtrip(m_impl->display);
+    m_impl->SyncInputHost();
     // Second roundtrip receives wl_seat capabilities and wl_output geometry/mode/scale
     (void)m_impl->wl.DisplayRoundtrip(m_impl->display);
 
@@ -1683,20 +855,7 @@ bool WaylandPlatformWindow::Create(
         return false;
     }
 
-    if (m_impl->dataDeviceMgr && m_impl->seat && m_impl->wl.ifaceDataDevice) {
-        wl_argument ddArgs[2]{};
-        ddArgs[0].o = nullptr;
-        ddArgs[1].o = reinterpret_cast<wl_object*>(m_impl->seat);
-        m_impl->dataDevice = m_impl->wl.MarshalNew<wl_data_device>(
-            m_impl->dataDeviceMgr,
-            kWlDataDevMgrGetDataDevice,
-            m_impl->wl.ifaceDataDevice,
-            ddArgs
-        );
-        if (m_impl->dataDevice) {
-            m_impl->wl.AddListener(m_impl->dataDevice, &Impl::kDataDeviceListener, m_impl.get());
-        }
-    }
+    m_impl->clipboard.Attach(&m_impl->wl, m_impl->display, m_impl->dataDeviceMgr, m_impl->input.GetSeat());
 
     // 2. Create wl_surface + xdg_surface + xdg_toplevel + optional HiDPI & decoration protocols
     wl_argument surfArg[1]{};
@@ -1711,6 +870,7 @@ bool WaylandPlatformWindow::Create(
         return false;
     }
     m_impl->wl.AddListener(m_impl->surface, &Impl::kSurfaceListener, m_impl.get());
+    m_impl->SyncInputHost();
 
     if (m_impl->highDpi && m_impl->viewporter && m_impl->fracScaleMgr) {
         wl_argument vpArgs[2]{};
@@ -1858,8 +1018,10 @@ bool WaylandPlatformWindow::Create(
 
     Impl* rawImpl = m_impl.get();
     ui.SetClipboardCallbacks(
-        [rawImpl]() -> keel::String { return rawImpl->GetSystemClipboard(); },
-        [rawImpl](keel::StringRef txt) { rawImpl->SetSystemClipboard(txt); }
+        [rawImpl]() -> keel::String { return rawImpl->clipboard.GetText(); },
+        [rawImpl](keel::StringRef txt) {
+            rawImpl->clipboard.SetText(txt, rawImpl->input.GetLastInputSerial());
+        }
     );
 
     m_impl->alive = true;
@@ -1876,7 +1038,10 @@ bool WaylandPlatformWindow::PumpEvents(Context& ui, bool reactiveMode, keel::i32
     if (!m_impl || !m_impl->alive || !m_impl->display) {
         return false;
     }
-    m_impl->activeUi = &ui;
+    if (m_impl->activeUi != &ui) {
+        m_impl->activeUi = &ui;
+        m_impl->SyncInputHost();
+    }
 
     if (m_impl->wl.DisplayGetError && m_impl->wl.DisplayGetError(m_impl->display) != 0) {
         m_impl->closeRequested = true;
@@ -1922,10 +1087,7 @@ bool WaylandPlatformWindow::PumpEvents(Context& ui, bool reactiveMode, keel::i32
 
     // Client-side keyboard auto-repeat
     const keel::u64 nowMs = keel::monotonic_ms();
-    if (m_impl->repeatingKeycode != 0u && m_impl->repeatRate > 0 && nowMs >= m_impl->nextRepeatMs) {
-        m_impl->DispatchXkbKey(m_impl->repeatingKeycode, ui);
-        const keel::u64 intervalMs = keel::max<keel::u64>(10u, 1000u / keel::as<keel::u64>(m_impl->repeatRate));
-        m_impl->nextRepeatMs = nowMs + intervalMs;
+    if (m_impl->input.TickKeyRepeat(nowMs, ui)) {
         hadEvents = true;
     }
 
@@ -1956,10 +1118,9 @@ bool WaylandPlatformWindow::PumpEvents(Context& ui, bool reactiveMode, keel::i32
             const keel::i32 remMs = keel::as<keel::i32>(rem);
             timeout = (timeout < 0) ? remMs : keel::min(timeout, remMs);
         }
-        if (m_impl->repeatingKeycode != 0u && m_impl->repeatRate > 0) {
-            const keel::u64 rem = (m_impl->nextRepeatMs > nowMs) ? (m_impl->nextRepeatMs - nowMs) : 1u;
-            const keel::i32 remMs = keel::as<keel::i32>(rem);
-            timeout = (timeout < 0) ? remMs : keel::min(timeout, remMs);
+        const keel::i32 repeatMs = m_impl->input.NextRepeatTimeoutMs(nowMs);
+        if (repeatMs >= 0) {
+            timeout = (timeout < 0) ? repeatMs : keel::min(timeout, repeatMs);
         }
 
         while (m_impl->wl.DisplayPrepareRead(m_impl->display) != 0) {
@@ -2113,10 +1274,8 @@ void WaylandPlatformWindow::SetVsyncEnabled(bool enabled) noexcept {
 }
 
 void WaylandPlatformWindow::SetCursor(CursorType cursor) noexcept {
-    if (!m_impl || cursor == m_impl->activeCursor) return;
-    m_impl->activeCursor = cursor;
-    if (!m_impl->resizeCursorOverride) {
-        m_impl->ApplyCurrentCursor();
+    if (m_impl) {
+        m_impl->input.SetCursor(cursor);
     }
 }
 
@@ -2200,18 +1359,21 @@ bool WaylandPlatformWindow::SetCustomTitleBar(bool enabled) noexcept {
             (void)m_impl->wl.DisplayFlush(m_impl->display);
         }
     }
-    if (!enabled && m_impl->resizeCursorOverride) {
-        m_impl->resizeCursorOverride = false;
-        m_impl->ApplyCurrentCursor();
+    if (!enabled) {
+        m_impl->input.ClearResizeCursorOverride();
     }
     return true;
 }
 
 void WaylandPlatformWindow::StartSystemMove() noexcept {
-    if (!m_impl || !m_impl->xdgToplevel || !m_impl->seat || m_impl->lastPointerSerial == 0u) return;
+    if (!m_impl || !m_impl->xdgToplevel) return;
+    wl_seat* seat = m_impl->input.GetSeat();
+    const keel::u32 serial = m_impl->input.GetLastPointerSerial();
+    if (!seat || serial == 0u) return;
+
     wl_argument args[2]{};
-    args[0].o = reinterpret_cast<wl_object*>(m_impl->seat);
-    args[1].u = m_impl->lastPointerSerial;
+    args[0].o = reinterpret_cast<wl_object*>(seat);
+    args[1].u = serial;
     m_impl->wl.MarshalVoid(m_impl->xdgToplevel, kXdgToplevelMove, args);
     if (m_impl->display) {
         (void)m_impl->wl.DisplayFlush(m_impl->display);
@@ -2222,21 +1384,17 @@ void WaylandPlatformWindow::StartSystemMove() noexcept {
 }
 
 void WaylandPlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
-    if (!m_impl || !m_impl->xdgToplevel || !m_impl->seat || m_impl->lastPointerSerial == 0u) return;
+    if (!m_impl || !m_impl->xdgToplevel) return;
+    const keel::u32 serial = m_impl->input.GetLastPointerSerial();
+    if (!m_impl->input.GetSeat() || serial == 0u) return;
+
     keel::u32 wlEdge = 0u;
     keel::u32 shape = 0u;
     CursorType fallbackCur = CursorType::Default;
-    if (!MapHitRegionToWaylandResize(edge, wlEdge, shape, fallbackCur)) {
+    if (!WaylandInput::MapHitRegionToResizeEdge(edge, wlEdge, shape, fallbackCur)) {
         return;
     }
-    wl_argument args[3]{};
-    args[0].o = reinterpret_cast<wl_object*>(m_impl->seat);
-    args[1].u = m_impl->lastPointerSerial;
-    args[2].u = wlEdge;
-    m_impl->wl.MarshalVoid(m_impl->xdgToplevel, kXdgToplevelResize, args);
-    if (m_impl->display) {
-        (void)m_impl->wl.DisplayFlush(m_impl->display);
-    }
+    m_impl->StartResizeWithSerial(serial, wlEdge);
     if (m_impl->activeUi) {
         m_impl->activeUi->ResetMouseButtonsAfterModalDialog();
     }

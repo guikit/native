@@ -25,7 +25,7 @@ ExecCaptureResult RunExternalDialogCommand(const keel::Array<keel::String>& args
     if (args.empty()) return res;
 
     int pipeFds[2]{-1, -1}; // keel-lint: ignore
-    if (::pipe(pipeFds) != 0) {
+    if (::pipe2(pipeFds, O_CLOEXEC) != 0) {
         return res;
     }
 
@@ -46,7 +46,7 @@ ExecCaptureResult RunExternalDialogCommand(const keel::Array<keel::String>& args
         ::close(pipeFds[0]);
         (void)::dup2(pipeFds[1], STDOUT_FILENO);
         ::close(pipeFds[1]);
-        const int devNull = ::open("/dev/null", O_WRONLY); // keel-lint: ignore
+        const int devNull = ::open("/dev/null", O_WRONLY | O_CLOEXEC); // keel-lint: ignore
         if (devNull >= 0) {
             (void)::dup2(devNull, STDERR_FILENO);
             ::close(devNull);
