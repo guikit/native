@@ -171,6 +171,7 @@ void WaylandInput::ReleasePointer() noexcept {
     m_pointer = nullptr;
     m_cursorShapeDev = nullptr;
     m_pointerOnSurface = false;
+    m_pointerBorderSurface = nullptr;
     m_resizeCursorOverride = false;
 }
 
@@ -262,7 +263,7 @@ keel::i32 WaylandInput::NextRepeatTimeoutMs(keel::u64 nowMs) const noexcept {
 }
 
 void WaylandInput::ApplyCurrentCursor() noexcept {
-    if (!m_host.wl || !m_pointer || !m_pointerOnSurface) return;
+    if (!m_host.wl || !m_pointer || (!m_pointerOnSurface && !m_pointerBorderSurface)) return;
 
     if (m_cursorShapeDev) {
         const keel::u32 shape = m_resizeCursorOverride
@@ -272,6 +273,9 @@ void WaylandInput::ApplyCurrentCursor() noexcept {
         args[0].u = m_lastPointerEnterSerial;
         args[1].u = shape;
         m_host.wl->MarshalVoid(m_cursorShapeDev, kWpCursorShapeDevSetShape, args);
+        if (m_host.display) {
+            (void)m_host.wl->DisplayFlush(m_host.display);
+        }
         return;
     }
 
@@ -334,6 +338,38 @@ void WaylandInput::ApplyCurrentCursor() noexcept {
     setCurArgs[2].i = keel::as<keel::i32>(img->hotspot_x) / curScale;
     setCurArgs[3].i = keel::as<keel::i32>(img->hotspot_y) / curScale;
     m_host.wl->MarshalVoid(m_pointer, kWlPointerSetCursor, setCurArgs);
+    if (m_host.display) {
+        (void)m_host.wl->DisplayFlush(m_host.display);
+    }
+}
+
+void WaylandInput::UpdateResizeCursorForRegion(WindowHitRegion reg, bool forceApply) noexcept {
+    keel::u32 edge = 0u;
+    keel::u32 shape = kWpCursorShapeDefault;
+    CursorType fallbackCur = CursorType::Default;
+    if (MapHitRegionToResizeEdge(reg, edge, shape, fallbackCur)) {
+        const bool changed = !m_resizeCursorOverride || m_resizeOverrideShape != shape;
+        m_resizeCursorOverride = true;
+        m_resizeOverrideShape = shape;
+        m_resizeOverrideFallback = fallbackCur;
+        if (changed || forceApply) {
+            ApplyCurrentCursor();
+        }
+    } else if (m_resizeCursorOverride || forceApply) {
+        m_resizeCursorOverride = false;
+        ApplyCurrentCursor();
+    }
+}
+
+void WaylandInput::UpdateMainSurfaceResizeCursor(bool forceApply) noexcept {
+    const bool csd = (m_host.customTitleBar && *m_host.customTitleBar);
+    if (csd && m_host.hitTest) {
+        const WindowHitRegion reg = m_host.hitTest(m_host.userData, m_pointerLogicalPos);
+        UpdateResizeCursorForRegion(reg, forceApply);
+    } else if (m_resizeCursorOverride || forceApply) {
+        m_resizeCursorOverride = false;
+        ApplyCurrentCursor();
+    }
 }
 
 void WaylandInput::DispatchXkbKey(keel::u32 xkbKeycode, Context& ui) noexcept {
@@ -401,15 +437,30 @@ void WaylandInput::OnPointerEnter(void* data, wl_pointer*, keel::u32 serial, wl_
     self->m_lastPointerEnterSerial = serial;
     self->m_lastPointerSerial = serial;
     self->m_lastInputSerial = serial;
-    self->m_pointerOnSurface = (surf == self->m_host.mainSurface);
-    if (!self->m_pointerOnSurface) return;
-
     self->m_pointerLogicalPos = {WlFixedToFloat(sx), WlFixedToFloat(sy)};
-    self->ApplyCurrentCursor();
-    if (self->m_host.ui) {
-        const keel::f32 dpi = (self->m_host.dpiScale && *self->m_host.dpiScale > 0.1f) ? *self->m_host.dpiScale : 1.0f;
-        self->m_host.ui->OnMouseMove({self->m_pointerLogicalPos.x * dpi, self->m_pointerLogicalPos.y * dpi});
+
+    if (surf == self->m_host.mainSurface) {
+        self->m_pointerOnSurface = true;
+        self->m_pointerBorderSurface = nullptr;
+        self->UpdateMainSurfaceResizeCursor(/*forceApply=*/true);
+        if (self->m_host.ui) {
+            const keel::f32 dpi = (self->m_host.dpiScale && *self->m_host.dpiScale > 0.1f) ? *self->m_host.dpiScale : 1.0f;
+            self->m_host.ui->OnMouseMove({self->m_pointerLogicalPos.x * dpi, self->m_pointerLogicalPos.y * dpi});
+        }
+        return;
     }
+
+    WindowHitRegion borderReg = WindowHitRegion::Client;
+    if (surf && self->m_host.borderHitTest &&
+        self->m_host.borderHitTest(self->m_host.userData, surf, self->m_pointerLogicalPos, borderReg)) {
+        self->m_pointerOnSurface = false;
+        self->m_pointerBorderSurface = surf;
+        self->UpdateResizeCursorForRegion(borderReg, /*forceApply=*/true);
+        return;
+    }
+
+    self->m_pointerOnSurface = false;
+    self->m_pointerBorderSurface = nullptr;
 }
 
 void WaylandInput::OnPointerLeave(void* data, wl_pointer*, keel::u32 serial, wl_surface* surf) {
@@ -423,33 +474,28 @@ void WaylandInput::OnPointerLeave(void* data, wl_pointer*, keel::u32 serial, wl_
         self->m_pendingWheelY = 0.0f;
         self->m_hasDiscreteWheelX = false;
         self->m_hasDiscreteWheelY = false;
+    } else if (surf && surf == self->m_pointerBorderSurface) {
+        self->m_pointerBorderSurface = nullptr;
+        self->m_resizeCursorOverride = false;
     }
 }
 
 void WaylandInput::OnPointerMotion(void* data, wl_pointer*, keel::u32, WlFixed sx, WlFixed sy) {
     auto* self = static_cast<WaylandInput*>(data);
-    if (!self || !self->m_pointerOnSurface) return;
+    if (!self) return;
     self->m_pointerLogicalPos = {WlFixedToFloat(sx), WlFixedToFloat(sy)};
 
-    const bool csd = (self->m_host.customTitleBar && *self->m_host.customTitleBar);
-    if (csd && self->m_host.hitTest) {
-        const WindowHitRegion reg = self->m_host.hitTest(self->m_host.userData, self->m_pointerLogicalPos);
-        keel::u32 edge = 0u;
-        keel::u32 shape = kWpCursorShapeDefault;
-        CursorType fallbackCur = CursorType::Default;
-        if (MapHitRegionToResizeEdge(reg, edge, shape, fallbackCur)) {
-            const bool changed = !self->m_resizeCursorOverride || self->m_resizeOverrideShape != shape;
-            self->m_resizeCursorOverride = true;
-            self->m_resizeOverrideShape = shape;
-            self->m_resizeOverrideFallback = fallbackCur;
-            if (changed) {
-                self->ApplyCurrentCursor();
-            }
-        } else if (self->m_resizeCursorOverride) {
-            self->m_resizeCursorOverride = false;
-            self->ApplyCurrentCursor();
+    if (self->m_pointerBorderSurface) {
+        WindowHitRegion borderReg = WindowHitRegion::Client;
+        if (self->m_host.borderHitTest &&
+            self->m_host.borderHitTest(self->m_host.userData, self->m_pointerBorderSurface, self->m_pointerLogicalPos, borderReg)) {
+            self->UpdateResizeCursorForRegion(borderReg, /*forceApply=*/false);
         }
+        return;
     }
+
+    if (!self->m_pointerOnSurface) return;
+    self->UpdateMainSurfaceResizeCursor(/*forceApply=*/false);
 
     if (self->m_host.ui) {
         const keel::f32 dpi = (self->m_host.dpiScale && *self->m_host.dpiScale > 0.1f) ? *self->m_host.dpiScale : 1.0f;
@@ -459,7 +505,27 @@ void WaylandInput::OnPointerMotion(void* data, wl_pointer*, keel::u32, WlFixed s
 
 void WaylandInput::OnPointerButton(void* data, wl_pointer*, keel::u32 serial, keel::u32, keel::u32 button, keel::u32 state) {
     auto* self = static_cast<WaylandInput*>(data);
-    if (!self || !self->m_pointerOnSurface) return;
+    if (!self) return;
+
+    if (self->m_pointerBorderSurface) {
+        self->m_lastPointerSerial = serial;
+        self->m_lastInputSerial = serial;
+        if (button == kBtnLeft && state == kWlPointerButtonPressed &&
+            self->m_host.borderHitTest && self->m_host.startResize) {
+            WindowHitRegion borderReg = WindowHitRegion::Client;
+            if (self->m_host.borderHitTest(self->m_host.userData, self->m_pointerBorderSurface, self->m_pointerLogicalPos, borderReg)) {
+                keel::u32 edge = 0u;
+                keel::u32 shape = 0u;
+                CursorType fallbackCur = CursorType::Default;
+                if (MapHitRegionToResizeEdge(borderReg, edge, shape, fallbackCur)) {
+                    self->m_host.startResize(self->m_host.userData, serial, edge);
+                }
+            }
+        }
+        return;
+    }
+
+    if (!self->m_pointerOnSurface) return;
     self->m_lastPointerSerial = serial;
     self->m_lastInputSerial = serial;
 

@@ -26,6 +26,7 @@ struct WaylandInputHost {
 
     void* userData{nullptr};
     WindowHitRegion (*hitTest)(void* userData, Vec2 logicalPos){nullptr};
+    bool (*borderHitTest)(void* userData, wl_surface* surf, Vec2 localPos, WindowHitRegion& outRegion){nullptr};
     void (*startResize)(void* userData, keel::u32 serial, keel::u32 xdgEdge){nullptr};
     void (*setFocused)(void* userData, bool focused){nullptr};
 };
@@ -69,6 +70,8 @@ public:
 
 private:
     void ApplyCurrentCursor() noexcept;
+    void UpdateResizeCursorForRegion(WindowHitRegion reg, bool forceApply) noexcept;
+    void UpdateMainSurfaceResizeCursor(bool forceApply) noexcept;
     void DispatchXkbKey(keel::u32 xkbKeycode, Context& ui) noexcept;
     void ReleasePointer() noexcept;
     void ReleaseKeyboard() noexcept;
@@ -121,6 +124,7 @@ private:
     keel::u64 m_nextRepeatMs{0u};
 
     bool m_pointerOnSurface{false};
+    wl_surface* m_pointerBorderSurface{nullptr};
     Vec2 m_pointerLogicalPos{0.0f, 0.0f};
     keel::u32 m_lastPointerEnterSerial{0u};
     keel::u32 m_lastPointerSerial{0u};

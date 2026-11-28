@@ -39,6 +39,7 @@ add_library(guikit_native STATIC
     src/guikit/native/linux/linux_egl_context.cpp
     src/guikit/native/linux/wayland_clipboard.cpp
     src/guikit/native/linux/wayland_input.cpp
+    src/guikit/native/linux/wayland_resize_borders.cpp
     src/guikit/native/wayland_platform_window.cpp
     src/guikit/native/win32_platform_window.cpp
     src/guikit/native/x11_platform_window.cpp

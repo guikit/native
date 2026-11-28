@@ -13,6 +13,7 @@
 #include "linux/wayland_clipboard.hpp"
 #include "linux/wayland_input.hpp"
 #include "linux/wayland_protocols.hpp"
+#include "linux/wayland_resize_borders.hpp"
 
 #if defined(__linux__) && !defined(__ANDROID__)
 #define GUIKIT_NATIVE_COMPILE_WAYLAND 1
@@ -51,10 +52,12 @@ struct WaylandPlatformWindow::Impl {
     linux_detail::LinuxEglContext egl{};
     WaylandClipboard clipboard{};
     WaylandInput input{};
+    WaylandResizeBorders resizeBorders{};
 
     wl_display* display{nullptr};
     wl_registry* registry{nullptr};
     wl_compositor* compositor{nullptr};
+    wl_subcompositor* subcompositor{nullptr};
     wl_shm* shm{nullptr};
     wl_data_device_manager* dataDeviceMgr{nullptr};
     keel::Array<OutputInfo> outputs{};
@@ -146,9 +149,15 @@ struct WaylandPlatformWindow::Impl {
         host.customTitleBar = &customTitleBar;
         host.userData = this;
         host.hitTest = &Impl::OnInputHitTest;
+        host.borderHitTest = &Impl::OnInputBorderHitTest;
         host.startResize = &Impl::OnInputStartResize;
         host.setFocused = &Impl::OnInputSetFocused;
         return host;
+    }
+
+    void SyncResizeBorders() noexcept {
+        const bool showOuterBorders = customTitleBar && resizable && !maximized && !fullscreen;
+        resizeBorders.Sync(showOuterBorders, logicalWidth, logicalHeight);
     }
 
     void SyncInputHost() noexcept {
@@ -174,6 +183,14 @@ struct WaylandPlatformWindow::Impl {
             return WindowHitRegion::Client;
         }
         return self->callbacks.onHitTest(logicalPos);
+    }
+
+    static bool OnInputBorderHitTest(void* userData, wl_surface* surf, Vec2 localPos, WindowHitRegion& outRegion) {
+        auto* self = static_cast<Impl*>(userData);
+        if (!self || !self->customTitleBar || !self->resizable || self->maximized || self->fullscreen) {
+            return false;
+        }
+        return self->resizeBorders.ResolveHitRegion(surf, localPos, outRegion);
     }
 
     static void OnInputStartResize(void* userData, keel::u32 serial, keel::u32 xdgEdge) {
@@ -205,6 +222,8 @@ struct WaylandPlatformWindow::Impl {
             wlEgl.Destroy(eglWindow);
             eglWindow = nullptr;
         }
+
+        resizeBorders.Destroy();
 
         if (fracScale) {
             wl.MarshalDestroy(fracScale, kWpFracScaleDestroy);
@@ -274,6 +293,10 @@ struct WaylandPlatformWindow::Impl {
         if (shm) {
             wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(shm));
             shm = nullptr;
+        }
+        if (subcompositor) {
+            wl.MarshalDestroy(subcompositor, kWlSubcompositorDestroy);
+            subcompositor = nullptr;
         }
         if (compositor) {
             wl.ProxyDestroy(reinterpret_cast<wl_proxy*>(compositor));
@@ -436,6 +459,8 @@ struct WaylandPlatformWindow::Impl {
             wl.MarshalVoid(xdgSurface, kXdgSurfaceSetWindowGeometry, geomArgs);
         }
 
+        SyncResizeBorders();
+
         if (eglWindow && wlEgl.Resize && (sizeChanged || dpiChanged || hadConfigure)) {
             wlEgl.Resize(eglWindow, fbWidth, fbHeight, 0, 0);
         }
@@ -476,6 +501,8 @@ struct WaylandPlatformWindow::Impl {
         if (s == "wl_compositor" && !self->compositor) {
             self->compositor = static_cast<wl_compositor*>(bindGlobal(self->wl.ifaceCompositor, 6u));
             self->SyncInputHost();
+        } else if (s == "wl_subcompositor" && !self->subcompositor && self->wl.ifaceSubcompositor) {
+            self->subcompositor = static_cast<wl_subcompositor*>(bindGlobal(self->wl.ifaceSubcompositor, 1u));
         } else if (s == "wl_shm" && !self->shm && self->wl.ifaceShm) {
             self->shm = static_cast<wl_shm*>(bindGlobal(self->wl.ifaceShm, 1u));
             self->SyncInputHost();
@@ -701,6 +728,7 @@ struct WaylandPlatformWindow::Impl {
             const bool wantCsd = (mode == kZxdgDecoModeClientSide);
             if (self->customTitleBar != wantCsd) {
                 self->customTitleBar = wantCsd;
+                self->SyncResizeBorders();
                 if (self->activeUi) {
                     self->activeUi->InvalidateAll();
                     self->activeUi->RequestRepaint(2);
@@ -987,6 +1015,17 @@ bool WaylandPlatformWindow::Create(
     if (!m_impl->initialConfigureDone) {
         (void)m_impl->wl.DisplayRoundtrip(m_impl->display);
     }
+
+    // Initialize invisible synchronized outer resize border subsurfaces (active in CSD mode)
+    (void)m_impl->resizeBorders.Init(
+        &m_impl->wl,
+        &m_impl->ext,
+        m_impl->compositor,
+        m_impl->subcompositor,
+        m_impl->shm,
+        m_impl->viewporter,
+        m_impl->surface
+    );
 
     // Apply initial configure & HiDPI scale before creating the EGL window surface
     m_impl->ApplyPendingSurfaceState(&ui, /*duringInit=*/true);
@@ -1351,13 +1390,21 @@ bool WaylandPlatformWindow::SetCustomTitleBar(bool enabled) noexcept {
         return true;
     }
     m_impl->customTitleBar = enabled;
+    m_impl->SyncResizeBorders();
     if (m_impl->toplevelDeco) {
         wl_argument arg[1]{};
         arg[0].u = enabled ? kZxdgDecoModeClientSide : kZxdgDecoModeServerSide;
         m_impl->wl.MarshalVoid(m_impl->toplevelDeco, kZxdgToplevelDecoSetMode, arg);
-        if (m_impl->display) {
-            (void)m_impl->wl.DisplayFlush(m_impl->display);
-        }
+    }
+    if (m_impl->activeUi) {
+        // Let the next eglSwapBuffers() commit synchronized border subsurfaces atomically with the frame
+        m_impl->activeUi->InvalidateAll();
+        m_impl->activeUi->RequestRepaint(2);
+    } else if (m_impl->surface && !m_impl->eglWindow) {
+        m_impl->wl.MarshalVoid(m_impl->surface, kWlSurfaceCommit);
+    }
+    if (m_impl->display) {
+        (void)m_impl->wl.DisplayFlush(m_impl->display);
     }
     if (!enabled) {
         m_impl->input.ClearResizeCursorOverride();
