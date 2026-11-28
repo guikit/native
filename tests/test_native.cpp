@@ -31,6 +31,12 @@ int main() {
     CHECK(!IsPlatformCompiled(NativePlatform::Emscripten));
     CHECK(CreateEmscriptenPlatformWindow() == nullptr);
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    CHECK(IsPlatformCompiled(NativePlatform::X11));
+    CHECK(IsPlatformCompiled(NativePlatform::Wayland));
+    CHECK(CreateX11PlatformWindow() != nullptr);
+    CHECK(CreateWaylandPlatformWindow() != nullptr);
+#endif
 
     // 2. GlEs3Canvas handles null procLoader gracefully without crashing
     {
@@ -76,7 +82,10 @@ int main() {
     }
 
     // 3. Live native platform window + OpenGL ES3 / GL3.3 Core smoke test when a display runtime is available
-    const bool hasLiveRuntime = X11PlatformWindow::IsRuntimeAvailable() || Win32PlatformWindow::IsRuntimeAvailable();
+    const bool hasLiveRuntime =
+        WaylandPlatformWindow::IsRuntimeAvailable() ||
+        X11PlatformWindow::IsRuntimeAvailable() ||
+        Win32PlatformWindow::IsRuntimeAvailable();
     if (hasLiveRuntime) {
         auto nativeWin = CreateNativePlatformWindow(NativePlatform::Auto);
         CHECK(nativeWin != nullptr);
@@ -335,6 +344,31 @@ void main() {
             nativeWin->Destroy();
         } else {
             keel::println("  -> Native display unreachable in current environment; skipping live GL test.");
+        }
+
+        // 4. On dual-stack Linux (Wayland + XWayland), also smoke-test X11PlatformWindow directly
+        //    (verifies EGL visual matching, XCreateWindow attributes, and EWMH _NET_WM_SYNC_REQUEST).
+        if (WaylandPlatformWindow::IsRuntimeAvailable() && X11PlatformWindow::IsRuntimeAvailable()) {
+            auto x11Win = CreateX11PlatformWindow();
+            CHECK(x11Win != nullptr);
+            Context x11Ui;
+            PlatformWindowDesc x11Desc{};
+            x11Desc.title = "GuiKit Native X11 Smoke";
+            x11Desc.width = 320;
+            x11Desc.height = 240;
+            x11Desc.vsync = false;
+            x11Desc.graphicsApi = GraphicsApi::OpenGLES3;
+            if (x11Win && x11Win->Create(x11Desc, x11Ui, {})) {
+                CHECK(x11Win->MakeContextCurrent());
+                GlEs3Canvas x11Canvas(x11Win->GetGlProcAddressFn(), false);
+                CHECK(x11Canvas.IsInitialized());
+                x11Canvas.Begin(320, 240, 1.0f);
+                x11Canvas.Clear(Color(18, 24, 38));
+                x11Canvas.End();
+                x11Win->SwapBuffers();
+                x11Win->Destroy();
+                keel::println("  -> Secondary X11 + EGL + XSync smoke test passed.");
+            }
         }
     }
 

@@ -27,6 +27,7 @@ public:
     void WakeUp() noexcept override;
 
     bool MakeContextCurrent() noexcept override;
+    void BeginFrameTarget(ICanvas& canvas, Context& ui) override;
     void SwapBuffers() noexcept override;
     [[nodiscard]] GlProcAddressFn GetGlProcAddressFn() const noexcept override;
 

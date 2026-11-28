@@ -10,6 +10,8 @@
 #include "keel/math.h"
 #include "keel/string.h"
 #include "keel/time.h"
+#include "linux/linux_desktop_services.hpp"
+#include "linux/linux_egl_context.hpp"
 
 #if defined(__linux__) && !defined(__ANDROID__) && __has_include(<X11/Xlib.h>)
 #define GUIKIT_NATIVE_COMPILE_X11 1
@@ -17,10 +19,8 @@
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
-#include <sys/wait.h>
 #include <unistd.h>
 using X11Card = unsigned long; // keel-lint: ignore
 using X11Long = long; // keel-lint: ignore
@@ -31,6 +31,8 @@ static constexpr Atom kX11XaString = 31u;
 #undef None
 #undef DestroyAll
 #undef DefaultScreen
+#undef DefaultDepth
+#undef DefaultVisual
 #undef RootWindow
 #undef ConnectionNumber
 #undef DisplayWidth
@@ -45,37 +47,20 @@ namespace guikit::native {
 
 namespace {
 
-using EGLDisplay = void*;
-using EGLConfig = void*;
-using EGLContext = void*;
-using EGLSurface = void*;
-using EGLNativeDisplayType = void*;
-using EGLNativeWindowType = unsigned long; // keel-lint: ignore
-using EGLBoolean = keel::u32;
-using EGLint = keel::i32;
-using EGLenum = keel::u32;
-using EglProcAddressRaw = void*(*)(const char*);
+// Exact XSync C ABI from <X11/extensions/syncconst.h> & <X11/extensions/sync.h>
+// (dynamically loaded from libXext.so.6 with zero link-time Xext dependency).
+struct X11SyncValue {
+    keel::i32 hi;
+    keel::u32 lo;
+};
+using X11SyncCounter = XID;
 
-static constexpr EGLint kEglFalse = 0;
-static constexpr EGLint kEglTrue = 1;
-static constexpr EGLint kEglNone = 0x3038;
-static constexpr EGLint kEglRedSize = 0x3024;
-static constexpr EGLint kEglGreenSize = 0x3023;
-static constexpr EGLint kEglBlueSize = 0x3022;
-static constexpr EGLint kEglAlphaSize = 0x3021;
-static constexpr EGLint kEglStencilSize = 0x3026;
-static constexpr EGLint kEglSamples = 0x3031;
-static constexpr EGLint kEglSampleBuffers = 0x3032;
-static constexpr EGLint kEglSurfaceType = 0x3033;
-static constexpr EGLint kEglWindowBit = 0x0004;
-static constexpr EGLint kEglRenderableType = 0x3040;
-static constexpr EGLint kEglOpenGlEs2Bit = 0x0004;
-static constexpr EGLint kEglOpenGlEs3Bit = 0x0040;
-static constexpr EGLint kEglOpenGlBit = 0x0008;
-static constexpr EGLint kEglContextClientVersion = 0x3098;
-static constexpr EGLenum kEglOpenGlEsApi = 0x30A0;
-static constexpr EGLenum kEglOpenGlApi = 0x30A2;
-static constexpr EGLenum kEglPlatformX11Khr = 0x31D5;
+[[nodiscard]] constexpr X11SyncValue MakeSyncValue(keel::u64 v) noexcept {
+    return X11SyncValue{
+        .hi = keel::as<keel::i32>((v >> 32u) & 0xFFFFFFFFu),
+        .lo = keel::as<keel::u32>(v & 0xFFFFFFFFu)
+    };
+}
 
 struct X11Api {
     keel::DynLib lib;
@@ -83,10 +68,16 @@ struct X11Api {
     using PfnXOpenDisplay = Display*(*)(const char*);
     using PfnXCloseDisplay = keel::i32(*)(Display*);
     using PfnXDefaultScreen = keel::i32(*)(Display*);
+    using PfnXDefaultDepth = keel::i32(*)(Display*, keel::i32);
+    using PfnXDefaultVisual = Visual*(*)(Display*, keel::i32);
     using PfnXRootWindow = Window(*)(Display*, keel::i32);
-    using PfnXCreateSimpleWindow = Window(*)(Display*, Window, keel::i32, keel::i32, keel::u32, keel::u32, keel::u32, unsigned long, unsigned long); // keel-lint: ignore
+    using PfnXGetVisualInfo = XVisualInfo*(*)(Display*, X11Long, XVisualInfo*, keel::i32*);
+    using PfnXCreateColormap = Colormap(*)(Display*, Window, Visual*, keel::i32);
+    using PfnXFreeColormap = keel::i32(*)(Display*, Colormap);
+    using PfnXCreateWindow = Window(*)(Display*, Window, keel::i32, keel::i32, keel::u32, keel::u32, keel::u32, keel::i32, keel::u32, Visual*, X11Card, XSetWindowAttributes*);
+    using PfnXCreateSimpleWindow = Window(*)(Display*, Window, keel::i32, keel::i32, keel::u32, keel::u32, keel::u32, X11Card, X11Card);
     using PfnXDestroyWindow = keel::i32(*)(Display*, Window);
-    using PfnXSelectInput = keel::i32(*)(Display*, Window, long); // keel-lint: ignore
+    using PfnXSelectInput = keel::i32(*)(Display*, Window, X11Long);
     using PfnXMapWindow = keel::i32(*)(Display*, Window);
     using PfnXFlush = keel::i32(*)(Display*);
     using PfnXPending = keel::i32(*)(Display*);
@@ -128,7 +119,13 @@ struct X11Api {
     PfnXOpenDisplay OpenDisplay{nullptr};
     PfnXCloseDisplay CloseDisplay{nullptr};
     PfnXDefaultScreen DefaultScreen{nullptr};
+    PfnXDefaultDepth DefaultDepth{nullptr};
+    PfnXDefaultVisual DefaultVisual{nullptr};
     PfnXRootWindow RootWindow{nullptr};
+    PfnXGetVisualInfo GetVisualInfo{nullptr};
+    PfnXCreateColormap CreateColormap{nullptr};
+    PfnXFreeColormap FreeColormap{nullptr};
+    PfnXCreateWindow CreateWindow{nullptr};
     PfnXCreateSimpleWindow CreateSimpleWindow{nullptr};
     PfnXDestroyWindow DestroyWindow{nullptr};
     PfnXSelectInput SelectInput{nullptr};
@@ -180,7 +177,13 @@ struct X11Api {
         OpenDisplay = lib.symbol<PfnXOpenDisplay>("XOpenDisplay");
         CloseDisplay = lib.symbol<PfnXCloseDisplay>("XCloseDisplay");
         DefaultScreen = lib.symbol<PfnXDefaultScreen>("XDefaultScreen");
+        DefaultDepth = lib.symbol<PfnXDefaultDepth>("XDefaultDepth");
+        DefaultVisual = lib.symbol<PfnXDefaultVisual>("XDefaultVisual");
         RootWindow = lib.symbol<PfnXRootWindow>("XRootWindow");
+        GetVisualInfo = lib.symbol<PfnXGetVisualInfo>("XGetVisualInfo");
+        CreateColormap = lib.symbol<PfnXCreateColormap>("XCreateColormap");
+        FreeColormap = lib.symbol<PfnXFreeColormap>("XFreeColormap");
+        CreateWindow = lib.symbol<PfnXCreateWindow>("XCreateWindow");
         CreateSimpleWindow = lib.symbol<PfnXCreateSimpleWindow>("XCreateSimpleWindow");
         DestroyWindow = lib.symbol<PfnXDestroyWindow>("XDestroyWindow");
         SelectInput = lib.symbol<PfnXSelectInput>("XSelectInput");
@@ -223,89 +226,42 @@ struct X11Api {
         QueryPointer = lib.symbol<PfnXQueryPointer>("XQueryPointer");
 
         return OpenDisplay && CloseDisplay && DefaultScreen && RootWindow &&
-               CreateSimpleWindow && DestroyWindow && SelectInput && MapWindow &&
+               (CreateWindow || CreateSimpleWindow) && DestroyWindow && SelectInput && MapWindow &&
                Flush && Pending && NextEvent && InternAtom && SetWMProtocols &&
                StoreName && LookupKeysym && LookupString && ConnectionNumber;
     }
 };
 
-struct EglApi {
+struct XSyncApi {
     keel::DynLib lib;
 
-    using PfnGetDisplay = EGLDisplay(*)(EGLNativeDisplayType);
-    using PfnGetPlatformDisplay = EGLDisplay(*)(EGLenum, void*, const keel::isize*);
-    using PfnGetPlatformDisplayExt = EGLDisplay(*)(EGLenum, void*, const EGLint*);
-    using PfnInitialize = EGLBoolean(*)(EGLDisplay, EGLint*, EGLint*);
-    using PfnTerminate = EGLBoolean(*)(EGLDisplay);
-    using PfnBindApi = EGLBoolean(*)(EGLenum);
-    using PfnChooseConfig = EGLBoolean(*)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
-    using PfnCreateWindowSurface = EGLSurface(*)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
-    using PfnDestroySurface = EGLBoolean(*)(EGLDisplay, EGLSurface);
-    using PfnCreateContext = EGLContext(*)(EGLDisplay, EGLConfig, EGLContext, const EGLint*);
-    using PfnDestroyContext = EGLBoolean(*)(EGLDisplay, EGLContext);
-    using PfnMakeCurrent = EGLBoolean(*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
-    using PfnSwapBuffers = EGLBoolean(*)(EGLDisplay, EGLSurface);
-    using PfnSwapInterval = EGLBoolean(*)(EGLDisplay, EGLint);
-    using PfnGetProcAddress = EglProcAddressRaw(*)(const char*);
+    using PfnQueryExtension = Status(*)(Display*, keel::i32*, keel::i32*);
+    using PfnInitialize = Status(*)(Display*, keel::i32*, keel::i32*);
+    using PfnCreateCounter = X11SyncCounter(*)(Display*, X11SyncValue);
+    using PfnSetCounter = Status(*)(Display*, X11SyncCounter, X11SyncValue);
+    using PfnDestroyCounter = Status(*)(Display*, X11SyncCounter);
 
-    PfnGetDisplay GetDisplay{nullptr};
-    PfnGetPlatformDisplay GetPlatformDisplay{nullptr};
-    PfnGetPlatformDisplayExt GetPlatformDisplayEXT{nullptr};
+    PfnQueryExtension QueryExtension{nullptr};
     PfnInitialize Initialize{nullptr};
-    PfnTerminate Terminate{nullptr};
-    PfnBindApi BindAPI{nullptr};
-    PfnChooseConfig ChooseConfig{nullptr};
-    PfnCreateWindowSurface CreateWindowSurface{nullptr};
-    PfnDestroySurface DestroySurface{nullptr};
-    PfnCreateContext CreateContext{nullptr};
-    PfnDestroyContext DestroyContext{nullptr};
-    PfnMakeCurrent MakeCurrent{nullptr};
-    PfnSwapBuffers SwapBuffers{nullptr};
-    PfnSwapInterval SwapInterval{nullptr};
-    PfnGetProcAddress GetProcAddress{nullptr};
+    PfnCreateCounter CreateCounter{nullptr};
+    PfnSetCounter SetCounter{nullptr};
+    PfnDestroyCounter DestroyCounter{nullptr};
 
     bool Load() noexcept {
         if (lib.is_open()) return true;
-        auto opened = keel::DynLib::open("libEGL.so.1");
-        if (!opened) opened = keel::DynLib::open("libEGL.so");
+        auto opened = keel::DynLib::open("libXext.so.6");
+        if (!opened) opened = keel::DynLib::open("libXext.so");
         if (!opened) return false;
         lib = keel::move(*opened);
 
-        GetDisplay = lib.symbol<PfnGetDisplay>("eglGetDisplay");
-        GetPlatformDisplay = lib.symbol<PfnGetPlatformDisplay>("eglGetPlatformDisplay");
-        Initialize = lib.symbol<PfnInitialize>("eglInitialize");
-        Terminate = lib.symbol<PfnTerminate>("eglTerminate");
-        BindAPI = lib.symbol<PfnBindApi>("eglBindAPI");
-        ChooseConfig = lib.symbol<PfnChooseConfig>("eglChooseConfig");
-        CreateWindowSurface = lib.symbol<PfnCreateWindowSurface>("eglCreateWindowSurface");
-        DestroySurface = lib.symbol<PfnDestroySurface>("eglDestroySurface");
-        CreateContext = lib.symbol<PfnCreateContext>("eglCreateContext");
-        DestroyContext = lib.symbol<PfnDestroyContext>("eglDestroyContext");
-        MakeCurrent = lib.symbol<PfnMakeCurrent>("eglMakeCurrent");
-        SwapBuffers = lib.symbol<PfnSwapBuffers>("eglSwapBuffers");
-        SwapInterval = lib.symbol<PfnSwapInterval>("eglSwapInterval");
-        GetProcAddress = lib.symbol<PfnGetProcAddress>("eglGetProcAddress");
-        if (GetProcAddress) {
-            void* rawExt = reinterpret_cast<void*>(GetProcAddress("eglGetPlatformDisplayEXT"));
-            if (rawExt) {
-                keel::mem_copy(&GetPlatformDisplayEXT, &rawExt, sizeof(GetPlatformDisplayEXT));
-            }
-        }
-
-        return GetDisplay && Initialize && Terminate && BindAPI && ChooseConfig &&
-               CreateWindowSurface && DestroySurface && CreateContext &&
-               DestroyContext && MakeCurrent && SwapBuffers && GetProcAddress;
+        QueryExtension = lib.symbol<PfnQueryExtension>("XSyncQueryExtension");
+        Initialize = lib.symbol<PfnInitialize>("XSyncInitialize");
+        CreateCounter = lib.symbol<PfnCreateCounter>("XSyncCreateCounter");
+        SetCounter = lib.symbol<PfnSetCounter>("XSyncSetCounter");
+        DestroyCounter = lib.symbol<PfnDestroyCounter>("XSyncDestroyCounter");
+        return QueryExtension && Initialize && CreateCounter && SetCounter && DestroyCounter;
     }
 };
-
-EglApi::PfnGetProcAddress g_activeEglGetProcAddress = nullptr;
-
-void* EglProcLoaderThunk(const char* procName) {
-    if (!g_activeEglGetProcAddress || !procName) {
-        return nullptr;
-    }
-    return reinterpret_cast<void*>(g_activeEglGetProcAddress(procName));
-}
 
 [[nodiscard]] Key MapX11KeySym(KeySym ks) noexcept {
     switch (ks) {
@@ -433,23 +389,53 @@ void AppendDownsampledNetWmIcon(
             const keel::u32 g = keel::as<keel::u32>(sumG / cnt);
             const keel::u32 b = keel::as<keel::u32>(sumB / cnt);
             const keel::u32 a = keel::as<keel::u32>(sumA / cnt);
-            // _NET_WM_ICON expects packed 0xAARRGGBB in each 32-bit CARDINAL element
             const keel::u32 argb = (a << 24) | (r << 16) | (g << 8) | b;
             outData.push_back(keel::as<X11Card>(argb));
         }
     }
 }
 
+void SendX11NetWmState(
+    X11Api& x11,
+    Display* display,
+    keel::i32 screen,
+    Window win,
+    X11Long action,
+    Atom prop1,
+    Atom prop2
+) noexcept {
+    if (!display || win == 0 || !x11.SendEvent) return;
+    const Atom netWmState = x11.InternAtom(display, "_NET_WM_STATE", False);
+    if (netWmState == kX11None) return;
+    XEvent ev{};
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = win;
+    ev.xclient.message_type = netWmState;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = action;
+    ev.xclient.data.l[1] = keel::as<X11Long>(prop1);
+    ev.xclient.data.l[2] = keel::as<X11Long>(prop2);
+    ev.xclient.data.l[3] = 1; // normal application source
+    const Window root = x11.RootWindow(display, screen);
+    (void)x11.SendEvent(display, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+    x11.Flush(display);
+}
+
 } // namespace
 
 struct X11PlatformWindow::Impl {
     X11Api x11{};
-    EglApi egl{};
+    XSyncApi xsync{};
+    linux_detail::LinuxEglContext egl{};
 
     Display* display{nullptr};
     keel::i32 screen{0};
+    Colormap colormap{0};
     Window window{0};
+    Atom wmProtocols{0};
     Atom wmDeleteWindow{0};
+    Atom atomNetWmSyncRequest{0};
+    Atom atomNetWmSyncCounter{0};
     Atom atomClipboard{0};
     Atom atomUtf8String{0};
     Atom atomTargets{0};
@@ -460,13 +446,19 @@ struct X11PlatformWindow::Impl {
     XIM xim{nullptr};
     XIC xic{nullptr};
 
-    EGLDisplay eglDisplay{nullptr};
-    EGLSurface eglSurface{nullptr};
-    EGLContext eglContext{nullptr};
+    // EWMH _NET_WM_SYNC_REQUEST (basic + extended frame synchronization counters)
+    bool hasXSync{false};
+    X11SyncCounter syncCounterBasic{0};
+    X11SyncCounter syncCounterExtended{0};
+    bool hasPendingSync{false};
+    bool pendingSyncIsExtended{false};
+    bool extendedFrameStarted{false};
+    keel::u64 pendingSyncValue{0u};
 
     keel::i32 wakeFd{-1};
     keel::i32 width{1380};
     keel::i32 height{800};
+    bool resizeCoalescedDirty{false};
     keel::f32 dpiScale{1.0f};
     keel::f32 pixelsPerMm{96.0f / 25.4f};
     bool vsync{true};
@@ -482,26 +474,26 @@ struct X11PlatformWindow::Impl {
     Cursor cursors[9]{};
 
     WindowHostCallbacks callbacks{};
+    Context* activeUi{nullptr};
     keel::String clipboardText;
 
     void DestroyAll() noexcept {
         alive = false;
-        if (eglDisplay && egl.MakeCurrent) {
-            (void)egl.MakeCurrent(eglDisplay, nullptr, nullptr, nullptr);
-        }
-        if (eglDisplay && eglContext && egl.DestroyContext) {
-            (void)egl.DestroyContext(eglDisplay, eglContext);
-            eglContext = nullptr;
-        }
-        if (eglDisplay && eglSurface && egl.DestroySurface) {
-            (void)egl.DestroySurface(eglDisplay, eglSurface);
-            eglSurface = nullptr;
-        }
-        if (eglDisplay && egl.Terminate) {
-            (void)egl.Terminate(eglDisplay);
-            eglDisplay = nullptr;
-        }
+        egl.Destroy();
         if (display) {
+            if (hasXSync && xsync.DestroyCounter) {
+                if (syncCounterExtended != 0) {
+                    (void)xsync.DestroyCounter(display, syncCounterExtended);
+                    syncCounterExtended = 0;
+                }
+                if (syncCounterBasic != 0) {
+                    (void)xsync.DestroyCounter(display, syncCounterBasic);
+                    syncCounterBasic = 0;
+                }
+            }
+            hasXSync = false;
+            hasPendingSync = false;
+            extendedFrameStarted = false;
             if (x11.FreeCursor) {
                 for (Cursor& c : cursors) {
                     if (c != 0) {
@@ -522,6 +514,10 @@ struct X11PlatformWindow::Impl {
                 x11.DestroyWindow(display, window);
                 window = 0;
             }
+            if (colormap != 0 && x11.FreeColormap) {
+                x11.FreeColormap(display, colormap);
+                colormap = 0;
+            }
             if (x11.CloseDisplay) {
                 x11.CloseDisplay(display);
             }
@@ -531,119 +527,87 @@ struct X11PlatformWindow::Impl {
             ::close(wakeFd);
             wakeFd = -1;
         }
+        activeUi = nullptr;
         callbacks = {};
     }
 
-    bool ChooseEglConfig(EGLint renderableBit, EGLConfig& outCfg) noexcept {
-        struct Profile {
-            EGLint stencilBits;
-            EGLint sampleBuffers;
-            EGLint samples;
-        };
-        static constexpr Profile kProfiles[] = {
-            {8, 0, 0}, // 8-bit stencil, 0 MSAA (all UI primitives use analytical SDF AA; avoids 4x fill-rate overhead)
-            {0, 0, 0}  // Minimal RGBA8 fallback
-        };
-        for (const Profile& prof : kProfiles) {
-            EGLint attribs[24]{};
-            keel::usize idx = 0u;
-            attribs[idx++] = kEglSurfaceType;    attribs[idx++] = kEglWindowBit;
-            attribs[idx++] = kEglRenderableType; attribs[idx++] = renderableBit;
-            attribs[idx++] = kEglRedSize;        attribs[idx++] = 8;
-            attribs[idx++] = kEglGreenSize;      attribs[idx++] = 8;
-            attribs[idx++] = kEglBlueSize;       attribs[idx++] = 8;
-            attribs[idx++] = kEglAlphaSize;      attribs[idx++] = 8;
-            if (prof.stencilBits > 0) {
-                attribs[idx++] = kEglStencilSize; attribs[idx++] = prof.stencilBits;
-            }
-            if (prof.sampleBuffers > 0) {
-                attribs[idx++] = kEglSampleBuffers; attribs[idx++] = prof.sampleBuffers;
-                attribs[idx++] = kEglSamples;       attribs[idx++] = prof.samples;
-            }
-            attribs[idx++] = kEglNone;
-
-            EGLConfig cfg = nullptr;
-            EGLint numConfigs = 0;
-            if (egl.ChooseConfig(eglDisplay, attribs, &cfg, 1, &numConfigs) == kEglTrue && numConfigs > 0 && cfg) {
-                outCfg = cfg;
-                return true;
-            }
+    void InitXSyncCounters() noexcept {
+        if (!display || window == 0 || atomNetWmSyncRequest == kX11None || atomNetWmSyncCounter == kX11None) {
+            return;
         }
-        return false;
+        if (!xsync.Load()) {
+            return;
+        }
+        keel::i32 eventBase = 0;
+        keel::i32 errorBase = 0;
+        keel::i32 major = 0;
+        keel::i32 minor = 0;
+        if (!xsync.QueryExtension(display, &eventBase, &errorBase) ||
+            !xsync.Initialize(display, &major, &minor)) {
+            return;
+        }
+
+        const X11SyncValue zero{0, 0u};
+        syncCounterBasic = xsync.CreateCounter(display, zero);
+        syncCounterExtended = xsync.CreateCounter(display, zero);
+        if (syncCounterBasic == 0 || syncCounterExtended == 0) {
+            if (syncCounterBasic != 0) {
+                (void)xsync.DestroyCounter(display, syncCounterBasic);
+                syncCounterBasic = 0;
+            }
+            if (syncCounterExtended != 0) {
+                (void)xsync.DestroyCounter(display, syncCounterExtended);
+                syncCounterExtended = 0;
+            }
+            return;
+        }
+
+        if (x11.ChangeProperty) {
+            const X11Card counters[2] = {
+                keel::as<X11Card>(syncCounterBasic),
+                keel::as<X11Card>(syncCounterExtended)
+            };
+            (void)x11.ChangeProperty(
+                display,
+                window,
+                atomNetWmSyncCounter,
+                kX11XaCardinal,
+                32,
+                PropModeReplace,
+                reinterpret_cast<const keel::u8*>(counters),
+                2
+            );
+        }
+        hasXSync = true;
     }
 
-    bool InitEgl(GraphicsApi requestedApi) noexcept {
-        if (!egl.Load()) {
-            keel::eprintln("[X11PlatformWindow] Failed to load libEGL.so.1");
-            return false;
+    void NotifySyncFrameBegin() noexcept {
+        if (!hasXSync || !hasPendingSync || !pendingSyncIsExtended || extendedFrameStarted) {
+            return;
         }
-        if (egl.GetPlatformDisplay) {
-            eglDisplay = egl.GetPlatformDisplay(kEglPlatformX11Khr, display, nullptr);
-        } else if (egl.GetPlatformDisplayEXT) {
-            eglDisplay = egl.GetPlatformDisplayEXT(kEglPlatformX11Khr, display, nullptr);
+        if (display && syncCounterExtended != 0 && xsync.SetCounter && pendingSyncValue >= 1u) {
+            // EWMH extended sync: odd value signals compositor "frame draw in progress"
+            const keel::u64 oddVal = ((pendingSyncValue & 1u) == 0u) ? (pendingSyncValue - 1u) : pendingSyncValue;
+            (void)xsync.SetCounter(display, syncCounterExtended, MakeSyncValue(oddVal));
+            x11.Flush(display);
+            extendedFrameStarted = true;
         }
-        if (!eglDisplay) {
-            eglDisplay = egl.GetDisplay(static_cast<EGLNativeDisplayType>(display));
-        }
-        if (!eglDisplay) {
-            keel::eprintln("[X11PlatformWindow] eglGetDisplay() failed");
-            return false;
-        }
-        EGLint major = 0, minor = 0;
-        if (egl.Initialize(eglDisplay, &major, &minor) == kEglFalse) {
-            keel::eprintln("[X11PlatformWindow] eglInitialize() failed");
-            eglDisplay = nullptr;
-            return false;
-        }
+    }
 
-        const bool tryEs3First = (requestedApi != GraphicsApi::OpenGL3);
-        bool boundEs = false;
-        EGLConfig cfg = nullptr;
-
-        if (tryEs3First && egl.BindAPI(kEglOpenGlEsApi) == kEglTrue) {
-            if (ChooseEglConfig(kEglOpenGlEs3Bit, cfg) || ChooseEglConfig(kEglOpenGlEs2Bit, cfg)) {
-                boundEs = true;
-            }
+    void NotifySyncFrameComplete() noexcept {
+        if (!hasXSync || !hasPendingSync || !display || !xsync.SetCounter) {
+            return;
         }
-
-        if (!boundEs) {
-            if (egl.BindAPI(kEglOpenGlApi) == kEglFalse) {
-                keel::eprintln("[X11PlatformWindow] Failed to bind EGL OpenGL ES or Desktop OpenGL API");
-                return false;
-            }
-            if (!ChooseEglConfig(kEglOpenGlBit, cfg)) {
-                keel::eprintln("[X11PlatformWindow] eglChooseConfig() failed");
-                return false;
-            }
+        if (pendingSyncIsExtended && syncCounterExtended != 0) {
+            // Even value signals compositor "frame presented to DRI3, safe to composite atomically"
+            const keel::u64 evenVal = ((pendingSyncValue & 1u) == 0u) ? pendingSyncValue : (pendingSyncValue + 1u);
+            (void)xsync.SetCounter(display, syncCounterExtended, MakeSyncValue(evenVal));
+        } else if (syncCounterBasic != 0) {
+            (void)xsync.SetCounter(display, syncCounterBasic, MakeSyncValue(pendingSyncValue));
         }
-
-        eglSurface = egl.CreateWindowSurface(eglDisplay, cfg, static_cast<EGLNativeWindowType>(window), nullptr);
-        if (!eglSurface) {
-            keel::eprintln("[X11PlatformWindow] eglCreateWindowSurface() failed");
-            return false;
-        }
-
-        if (boundEs) {
-            const EGLint ctxAttribs[] = {kEglContextClientVersion, 3, kEglNone};
-            eglContext = egl.CreateContext(eglDisplay, cfg, nullptr, ctxAttribs);
-        } else {
-            const EGLint ctxAttribs[] = {kEglNone};
-            eglContext = egl.CreateContext(eglDisplay, cfg, nullptr, ctxAttribs);
-        }
-        if (!eglContext) {
-            keel::eprintln("[X11PlatformWindow] eglCreateContext() failed");
-            return false;
-        }
-
-        g_activeEglGetProcAddress = egl.GetProcAddress;
-        if (egl.MakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext) == kEglFalse) {
-            keel::eprintln("[X11PlatformWindow] eglMakeCurrent() failed");
-            return false;
-        }
-        if (egl.SwapInterval) {
-            (void)egl.SwapInterval(eglDisplay, vsync ? 1 : 0);
-        }
-        return true;
+        x11.Flush(display);
+        hasPendingSync = false;
+        extendedFrameStarted = false;
     }
 
     void SetSystemClipboard(keel::StringRef text) {
@@ -694,7 +658,7 @@ struct X11PlatformWindow::Impl {
                         window,
                         ev.xselection.property,
                         0,
-                        262144, // up to 1 MiB (in 32-bit longs)
+                        262144,
                         True,
                         AnyPropertyType,
                         &actualType,
@@ -840,7 +804,7 @@ struct X11PlatformWindow::Impl {
                     X11Long inputMode;
                     X11Card status;
                 };
-                const MotifWmHints hints{2u, 0u, 0u, 0, 0u}; // MWM_HINTS_DECORATIONS = 2, decorations = 0
+                const MotifWmHints hints{2u, 0u, 0u, 0, 0u};
                 (void)x11.ChangeProperty(
                     display,
                     window,
@@ -987,13 +951,27 @@ struct X11PlatformWindow::Impl {
             return;
         }
         switch (ev.type) {
-            case ClientMessage:
-                if (keel::as<Atom>(ev.xclient.data.l[0]) == wmDeleteWindow) {
+            case ClientMessage: {
+                const Atom proto = keel::as<Atom>(ev.xclient.data.l[0]);
+                if (proto == wmDeleteWindow) {
                     if (!callbacks.onCloseRequested || callbacks.onCloseRequested()) {
                         closeRequested = true;
                     }
+                } else if (hasXSync && proto == atomNetWmSyncRequest) {
+                    const keel::u64 lo = keel::as<keel::u32>(ev.xclient.data.l[2]);
+                    const keel::u64 hi = keel::as<keel::u32>(ev.xclient.data.l[3]);
+                    pendingSyncValue = (hi << 32u) | lo;
+                    pendingSyncIsExtended = (ev.xclient.data.l[4] == 1);
+                    hasPendingSync = true;
+                    extendedFrameStarted = false;
+                    if (minimized) {
+                        NotifySyncFrameComplete();
+                    } else {
+                        ui.InvalidateAll();
+                    }
                 }
                 break;
+            }
 
             case ConfigureNotify: {
                 const keel::i32 nw = ev.xconfigure.width;
@@ -1001,9 +979,7 @@ struct X11PlatformWindow::Impl {
                 if (nw > 0 && nh > 0 && (nw != width || nh != height)) {
                     width = nw;
                     height = nh;
-                    if (callbacks.onResize) {
-                        callbacks.onResize(width, height);
-                    }
+                    resizeCoalescedDirty = true;
                     ui.InvalidateAll();
                 }
                 break;
@@ -1023,6 +999,9 @@ struct X11PlatformWindow::Impl {
 
             case UnmapNotify:
                 minimized = true;
+                if (hasPendingSync) {
+                    NotifySyncFrameComplete();
+                }
                 break;
 
             case SelectionRequest:
@@ -1160,8 +1139,7 @@ bool X11PlatformWindow::IsRuntimeAvailable() noexcept {
         return false;
     }
     X11Api x11;
-    EglApi egl;
-    return x11.Load() && egl.Load();
+    return x11.Load() && linux_detail::LinuxEglContext::IsRuntimeAvailable();
 }
 
 bool X11PlatformWindow::Create(
@@ -1190,6 +1168,7 @@ bool X11PlatformWindow::Create(
     m_impl->closeRequested = false;
     m_impl->minimized = false;
     m_impl->callbacks = keel::move(callbacks);
+    m_impl->activeUi = &ui;
 
     if (desc.highDpi && m_impl->x11.ResourceManagerString) {
         m_impl->dpiScale = ParseXftDpiScale(m_impl->x11.ResourceManagerString(m_impl->display));
@@ -1206,31 +1185,105 @@ bool X11PlatformWindow::Create(
         }
     }
 
+    // 1. Initialize EGL display and pick config FIRST so the X11 window visual matches EGL_NATIVE_VISUAL_ID
+    const bool useEgl = (desc.graphicsApi != GraphicsApi::None);
+    if (useEgl) {
+        if (!m_impl->egl.InitDisplayAndConfig(
+                linux_detail::LinuxEglContext::kPlatformX11Khr,
+                m_impl->display,
+                desc.graphicsApi,
+                /*alphaBits=*/0
+            )) {
+            m_impl->DestroyAll();
+            return false;
+        }
+    }
+
     const Window root = m_impl->x11.RootWindow(m_impl->display, m_impl->screen);
-    m_impl->window = m_impl->x11.CreateSimpleWindow(
-        m_impl->display,
-        root,
-        0,
-        0,
-        keel::as<keel::u32>(m_impl->width),
-        keel::as<keel::u32>(m_impl->height),
-        0,
-        0,
-        0
-    );
+    const X11Long eventMask =
+        ExposureMask | StructureNotifyMask | PropertyChangeMask |
+        KeyPressMask | KeyReleaseMask |
+        ButtonPressMask | ButtonReleaseMask |
+        PointerMotionMask | FocusChangeMask;
+
+    // 2. Create X11 window with matching EGL visual, background_pixmap = None, and NorthWestGravity
+    //    (prevents X11 / XWayland from clearing the window to black on every resize step).
+    if (m_impl->x11.CreateWindow) {
+        Visual* targetVisual = m_impl->x11.DefaultVisual ? m_impl->x11.DefaultVisual(m_impl->display, m_impl->screen) : nullptr;
+        keel::i32 targetDepth = m_impl->x11.DefaultDepth ? m_impl->x11.DefaultDepth(m_impl->display, m_impl->screen) : CopyFromParent;
+
+        XVisualInfo* matchedVis = nullptr;
+        const keel::i32 eglVisualId = m_impl->egl.GetNativeVisualId();
+        if (useEgl && eglVisualId != 0 && m_impl->x11.GetVisualInfo) {
+            XVisualInfo tmpl{};
+            tmpl.visualid = keel::as<VisualID>(eglVisualId);
+            keel::i32 count = 0;
+            matchedVis = m_impl->x11.GetVisualInfo(m_impl->display, VisualIDMask, &tmpl, &count);
+            if (matchedVis && count > 0) {
+                targetVisual = matchedVis->visual;
+                targetDepth = matchedVis->depth;
+            }
+        }
+
+        XSetWindowAttributes swa{};
+        X11Card mask = CWBackPixmap | CWBorderPixel | CWBitGravity | CWEventMask;
+        swa.background_pixmap = kX11None;
+        swa.border_pixel = 0u;
+        swa.bit_gravity = NorthWestGravity;
+        swa.event_mask = eventMask;
+
+        if (targetVisual && m_impl->x11.CreateColormap) {
+            m_impl->colormap = m_impl->x11.CreateColormap(m_impl->display, root, targetVisual, AllocNone);
+            if (m_impl->colormap != 0) {
+                swa.colormap = m_impl->colormap;
+                mask |= CWColormap;
+            }
+        }
+
+        m_impl->window = m_impl->x11.CreateWindow(
+            m_impl->display,
+            root,
+            0,
+            0,
+            keel::as<keel::u32>(m_impl->width),
+            keel::as<keel::u32>(m_impl->height),
+            0,
+            targetDepth,
+            InputOutput,
+            targetVisual ? targetVisual : reinterpret_cast<Visual*>(CopyFromParent),
+            mask,
+            &swa
+        );
+
+        if (matchedVis && m_impl->x11.Free) {
+            m_impl->x11.Free(matchedVis);
+        }
+    } else {
+        m_impl->window = m_impl->x11.CreateSimpleWindow(
+            m_impl->display,
+            root,
+            0,
+            0,
+            keel::as<keel::u32>(m_impl->width),
+            keel::as<keel::u32>(m_impl->height),
+            0,
+            0,
+            0
+        );
+        if (m_impl->window != 0) {
+            m_impl->x11.SelectInput(m_impl->display, m_impl->window, eventMask);
+        }
+    }
+
     if (m_impl->window == 0) {
         m_impl->DestroyAll();
         return false;
     }
 
-    const long eventMask = // keel-lint: ignore
-        ExposureMask | StructureNotifyMask | PropertyChangeMask |
-        KeyPressMask | KeyReleaseMask |
-        ButtonPressMask | ButtonReleaseMask |
-        PointerMotionMask | FocusChangeMask;
-    m_impl->x11.SelectInput(m_impl->display, m_impl->window, eventMask);
-
+    m_impl->wmProtocols = m_impl->x11.InternAtom(m_impl->display, "WM_PROTOCOLS", False);
     m_impl->wmDeleteWindow = m_impl->x11.InternAtom(m_impl->display, "WM_DELETE_WINDOW", False);
+    m_impl->atomNetWmSyncRequest = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_SYNC_REQUEST", False);
+    m_impl->atomNetWmSyncCounter = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_SYNC_REQUEST_COUNTER", False);
     m_impl->atomClipboard = m_impl->x11.InternAtom(m_impl->display, "CLIPBOARD", False);
     m_impl->atomUtf8String = m_impl->x11.InternAtom(m_impl->display, "UTF8_STRING", False);
     m_impl->atomTargets = m_impl->x11.InternAtom(m_impl->display, "TARGETS", False);
@@ -1238,7 +1291,12 @@ bool X11PlatformWindow::Create(
     m_impl->atomNetWmState = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE", False);
     m_impl->atomNetWmStateMaxH = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
     m_impl->atomNetWmStateMaxV = m_impl->x11.InternAtom(m_impl->display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
-    m_impl->x11.SetWMProtocols(m_impl->display, m_impl->window, &m_impl->wmDeleteWindow, 1);
+
+    // 3. Register EWMH _NET_WM_SYNC_REQUEST (basic + extended counters) for tear-free WM resize sync
+    m_impl->InitXSyncCounters();
+    Atom protocols[2]{m_impl->wmDeleteWindow, m_impl->atomNetWmSyncRequest};
+    const keel::i32 protocolCount = (m_impl->hasXSync && m_impl->atomNetWmSyncRequest != kX11None) ? 2 : 1;
+    m_impl->x11.SetWMProtocols(m_impl->display, m_impl->window, protocols, protocolCount);
 
     const keel::String titleStr = keel::String::from(desc.title.as_ref());
     m_impl->x11.StoreName(m_impl->display, m_impl->window, titleStr.c_str());
@@ -1290,8 +1348,8 @@ bool X11PlatformWindow::Create(
         }
     }
 
-    if (desc.graphicsApi != GraphicsApi::None) {
-        if (!m_impl->InitEgl(desc.graphicsApi)) {
+    if (useEgl) {
+        if (!m_impl->egl.CreateSurfaceAndContext(keel::as<keel::usize>(m_impl->window), m_impl->vsync ? 1 : 0)) {
             m_impl->DestroyAll();
             return false;
         }
@@ -1302,7 +1360,6 @@ bool X11PlatformWindow::Create(
 
     m_impl->wakeFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 
-    // Bind X11 CLIPBOARD selection protocol callbacks (UTF8_STRING / STRING / TARGETS)
     Impl* rawImpl = m_impl.get();
     ui.SetClipboardCallbacks(
         [rawImpl]() -> keel::String { return rawImpl->GetSystemClipboard(); },
@@ -1326,19 +1383,26 @@ bool X11PlatformWindow::PumpEvents(Context& ui, bool reactiveMode, keel::i32 sle
         return false;
     }
 
-    // Drain any already-queued X11 events first
-    bool hadEvents = false;
-    while (m_impl->x11.Pending(m_impl->display) > 0) {
-        XEvent ev{};
-        m_impl->x11.NextEvent(m_impl->display, &ev);
-        m_impl->DispatchEvent(ev, ui);
-        hadEvents = true;
-        if (m_impl->closeRequested) {
-            return false;
+    auto drainQueue = [&]() -> bool {
+        bool any = false;
+        while (m_impl->x11.Pending(m_impl->display) > 0) {
+            XEvent ev{};
+            m_impl->x11.NextEvent(m_impl->display, &ev);
+            m_impl->DispatchEvent(ev, ui);
+            any = true;
+            if (m_impl->closeRequested) {
+                return true;
+            }
         }
+        return any;
+    };
+
+    const bool hadEvents = drainQueue();
+    if (m_impl->closeRequested) {
+        return false;
     }
 
-    const bool shouldSleep = !hadEvents && sleepTimeoutMs != 0 &&
+    const bool shouldSleep = !hadEvents && !m_impl->hasPendingSync && sleepTimeoutMs != 0 &&
         (m_impl->minimized || (reactiveMode && !ui.NeedsRepaint()));
     if (shouldSleep) {
         const keel::i32 x11Fd = m_impl->x11.ConnectionNumber(m_impl->display);
@@ -1360,15 +1424,19 @@ bool X11PlatformWindow::PumpEvents(Context& ui, bool reactiveMode, keel::i32 sle
                 const keel::isize ignored = ::read(m_impl->wakeFd, &drained, sizeof(drained));
                 (void)ignored;
             }
-            while (m_impl->x11.Pending(m_impl->display) > 0) {
-                XEvent ev{};
-                m_impl->x11.NextEvent(m_impl->display, &ev);
-                m_impl->DispatchEvent(ev, ui);
-                if (m_impl->closeRequested) {
-                    return false;
-                }
+            (void)drainQueue();
+            if (m_impl->closeRequested) {
+                return false;
             }
         }
+    }
+
+    if (m_impl->resizeCoalescedDirty) {
+        m_impl->resizeCoalescedDirty = false;
+        if (m_impl->callbacks.onResize) {
+            m_impl->callbacks.onResize(m_impl->width, m_impl->height);
+        }
+        ui.InvalidateAll();
     }
 
     return !m_impl->closeRequested;
@@ -1383,20 +1451,23 @@ void X11PlatformWindow::WakeUp() noexcept {
 }
 
 bool X11PlatformWindow::MakeContextCurrent() noexcept {
-    if (!m_impl || !m_impl->eglDisplay || !m_impl->eglContext || !m_impl->eglSurface) {
-        return true;
+    return m_impl ? m_impl->egl.MakeCurrent() : true;
+}
+
+void X11PlatformWindow::BeginFrameTarget(ICanvas& /*canvas*/, Context& /*ui*/) {
+    if (m_impl) {
+        m_impl->NotifySyncFrameBegin();
     }
-    return m_impl->egl.MakeCurrent(m_impl->eglDisplay, m_impl->eglSurface, m_impl->eglSurface, m_impl->eglContext) == kEglTrue;
 }
 
 void X11PlatformWindow::SwapBuffers() noexcept {
-    if (m_impl && m_impl->eglDisplay && m_impl->eglSurface) {
-        (void)m_impl->egl.SwapBuffers(m_impl->eglDisplay, m_impl->eglSurface);
-    }
+    if (!m_impl) return;
+    m_impl->egl.SwapBuffers();
+    m_impl->NotifySyncFrameComplete();
 }
 
 GlProcAddressFn X11PlatformWindow::GetGlProcAddressFn() const noexcept {
-    return (m_impl && m_impl->egl.GetProcAddress) ? &EglProcLoaderThunk : nullptr;
+    return m_impl ? m_impl->egl.GetProcAddressFn() : nullptr;
 }
 
 keel::i32 X11PlatformWindow::GetFramebufferWidth() const noexcept {
@@ -1420,7 +1491,7 @@ bool X11PlatformWindow::IsMinimized() const noexcept {
 }
 
 bool X11PlatformWindow::IsLiveResizeFrame() const noexcept {
-    return false;
+    return m_impl ? m_impl->hasPendingSync : false;
 }
 
 bool X11PlatformWindow::IsVsyncEnabled() const noexcept {
@@ -1430,9 +1501,7 @@ bool X11PlatformWindow::IsVsyncEnabled() const noexcept {
 void X11PlatformWindow::SetVsyncEnabled(bool enabled) noexcept {
     if (!m_impl) return;
     m_impl->vsync = enabled;
-    if (m_impl->eglDisplay && m_impl->egl.SwapInterval) {
-        (void)m_impl->egl.SwapInterval(m_impl->eglDisplay, enabled ? 1 : 0);
-    }
+    m_impl->egl.SetSwapInterval(enabled ? 1 : 0);
 }
 
 void X11PlatformWindow::SetCursor(CursorType cursor) noexcept {
@@ -1446,13 +1515,7 @@ void X11PlatformWindow::SetCursor(CursorType cursor) noexcept {
 }
 
 void X11PlatformWindow::OpenUrl(keel::StringRef url) const noexcept {
-    if (url.empty()) return;
-    const keel::String urlStr = keel::String::from(url);
-    const pid_t pid = ::fork();
-    if (pid == 0) {
-        ::execlp("xdg-open", "xdg-open", urlStr.c_str(), static_cast<char*>(nullptr));
-        ::_exit(127);
-    }
+    linux_detail::OpenLinuxUrl(url);
 }
 
 void X11PlatformWindow::SetTitle(keel::StringRef title) noexcept {
@@ -1487,95 +1550,6 @@ void X11PlatformWindow::Minimize() noexcept {
         m_impl->x11.Flush(m_impl->display);
     }
 }
-
-namespace {
-
-void SendX11NetWmState(
-    X11Api& x11,
-    Display* display,
-    keel::i32 screen,
-    Window win,
-    X11Long action,
-    Atom prop1,
-    Atom prop2
-) noexcept {
-    if (!display || win == 0 || !x11.SendEvent) return;
-    const Atom netWmState = x11.InternAtom(display, "_NET_WM_STATE", False);
-    if (netWmState == kX11None) return;
-    XEvent ev{};
-    ev.xclient.type = ClientMessage;
-    ev.xclient.window = win;
-    ev.xclient.message_type = netWmState;
-    ev.xclient.format = 32;
-    ev.xclient.data.l[0] = action;
-    ev.xclient.data.l[1] = keel::as<X11Long>(prop1);
-    ev.xclient.data.l[2] = keel::as<X11Long>(prop2);
-    ev.xclient.data.l[3] = 1; // normal application source
-    const Window root = x11.RootWindow(display, screen);
-    (void)x11.SendEvent(display, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
-    x11.Flush(display);
-}
-
-struct ExecCaptureResult {
-    bool launched{false};
-    keel::i32 exitCode{-1};
-    keel::String output;
-};
-
-ExecCaptureResult RunExternalDialogCommand(const keel::Array<keel::String>& args) {
-    ExecCaptureResult res{};
-    if (args.empty()) return res;
-
-    int pipeFds[2]{-1, -1}; // keel-lint: ignore
-    if (::pipe(pipeFds) != 0) {
-        return res;
-    }
-
-    keel::Array<char*> argv;
-    argv.reserve(args.size() + 1u);
-    for (const keel::String& s : args) {
-        argv.push_back(const_cast<char*>(s.c_str()));
-    }
-    argv.push_back(nullptr);
-
-    const pid_t pid = ::fork();
-    if (pid < 0) {
-        ::close(pipeFds[0]);
-        ::close(pipeFds[1]);
-        return res;
-    }
-    if (pid == 0) {
-        ::close(pipeFds[0]);
-        (void)::dup2(pipeFds[1], STDOUT_FILENO);
-        ::close(pipeFds[1]);
-        const int devNull = ::open("/dev/null", O_WRONLY); // keel-lint: ignore
-        if (devNull >= 0) {
-            (void)::dup2(devNull, STDERR_FILENO);
-            ::close(devNull);
-        }
-        ::execvp(argv[0], argv.data());
-        ::_exit(127);
-    }
-
-    ::close(pipeFds[1]);
-    char buf[1024]{};
-    while (true) {
-        const keel::isize n = ::read(pipeFds[0], buf, sizeof(buf));
-        if (n <= 0) break;
-        res.output.append(keel::StringRef(buf, keel::as<keel::usize>(n)));
-    }
-    ::close(pipeFds[0]);
-
-    int status = 0; // keel-lint: ignore
-    (void)::waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) {
-        res.exitCode = WEXITSTATUS(status);
-        res.launched = (res.exitCode != 127);
-    }
-    return res;
-}
-
-} // namespace
 
 void X11PlatformWindow::Maximize() noexcept {
     if (!m_impl || !m_impl->display || m_impl->window == 0) return;
@@ -1656,6 +1630,9 @@ bool X11PlatformWindow::SetCustomTitleBar(bool enabled) noexcept {
 void X11PlatformWindow::StartSystemMove() noexcept {
     if (!m_impl) return;
     m_impl->StartMoveResizeAction(8); // _NET_WM_MOVERESIZE_MOVE
+    if (m_impl->activeUi) {
+        m_impl->activeUi->ResetMouseButtonsAfterModalDialog();
+    }
 }
 
 void X11PlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
@@ -1664,6 +1641,9 @@ void X11PlatformWindow::StartSystemResize(WindowHitRegion edge) noexcept {
     X11Long dir = -1;
     if (Impl::MapResizeRegionToX11(edge, ignoredCur, dir)) {
         m_impl->StartMoveResizeAction(dir);
+        if (m_impl->activeUi) {
+            m_impl->activeUi->ResetMouseButtonsAfterModalDialog();
+        }
     }
 }
 
@@ -1672,144 +1652,11 @@ bool X11PlatformWindow::SupportsFileDialogs() const noexcept {
 }
 
 FileDialogResult X11PlatformWindow::ShowFileDialog(const FileDialogOptions& opts) {
-    FileDialogResult result{};
-    result.supported = false;
-    result.accepted = false;
-
-    // 1. Try zenity first (GNOME/GTK ecosystems)
-    {
-        keel::Array<keel::String> args;
-        args.push_back(keel::String("zenity"));
-        args.push_back(keel::String("--file-selection"));
-        if (!opts.title.empty()) {
-            args.push_back(keel::String("--title"));
-            args.push_back(keel::String::from(opts.title));
-        }
-        if (opts.kind == FileDialogKind::OpenFiles) {
-            args.push_back(keel::String("--multiple"));
-            args.push_back(keel::String("--separator=\n"));
-        } else if (opts.kind == FileDialogKind::SaveFile) {
-            args.push_back(keel::String("--save"));
-            args.push_back(keel::String("--confirm-overwrite"));
-        } else if (opts.kind == FileDialogKind::SelectFolder) {
-            args.push_back(keel::String("--directory"));
-        }
-        if (!opts.defaultPath.empty() || !opts.defaultName.empty()) {
-            keel::String fn = keel::String::from(opts.defaultPath);
-            if (!opts.defaultName.empty()) {
-                if (!fn.empty() && fn.back() != '/') fn.push_back('/');
-                fn.append(opts.defaultName);
-            }
-            if (!fn.empty()) {
-                args.push_back(keel::String("--filename"));
-                args.push_back(keel::move(fn));
-            }
-        }
-        if (opts.kind != FileDialogKind::SelectFolder) {
-            for (const FileDialogFilter& f : opts.filters) {
-                if (f.pattern.empty()) continue;
-                keel::String spec = keel::String::from(f.name.empty() ? f.pattern : f.name);
-                spec.append(" | ");
-                for (keel::usize i = 0u; i < f.pattern.size(); ++i) {
-                    spec.push_back(f.pattern[i] == ';' ? ' ' : f.pattern[i]);
-                }
-                args.push_back(keel::String("--file-filter"));
-                args.push_back(keel::move(spec));
-            }
-        }
-
-        const ExecCaptureResult exec = RunExternalDialogCommand(args);
-        if (exec.launched) {
-            result.supported = true;
-            if (exec.exitCode == 0) {
-                keel::usize pos = 0u;
-                while (pos < exec.output.size()) {
-                    keel::usize nl = exec.output.find('\n', pos);
-                    if (nl == keel::StringRef::npos) nl = exec.output.size();
-                    const keel::StringRef line = exec.output.substr(pos, nl - pos).trim();
-                    if (!line.empty()) {
-                        result.paths.push_back(keel::String::from(line));
-                    }
-                    pos = (nl < exec.output.size()) ? (nl + 1u) : exec.output.size();
-                }
-                result.accepted = !result.paths.empty();
-            }
-            return result;
-        }
-    }
-
-    // 2. Fallback to kdialog (KDE/Qt ecosystems)
-    {
-        keel::Array<keel::String> args;
-        args.push_back(keel::String("kdialog"));
-        if (!opts.title.empty()) {
-            args.push_back(keel::String("--title"));
-            args.push_back(keel::String::from(opts.title));
-        }
-        switch (opts.kind) {
-            case FileDialogKind::OpenFile:     args.push_back(keel::String("--getopenfilename")); break;
-            case FileDialogKind::OpenFiles:    args.push_back(keel::String("--getopenfilename")); args.push_back(keel::String("--multiple")); args.push_back(keel::String("--separate-output")); break;
-            case FileDialogKind::SaveFile:     args.push_back(keel::String("--getsavefilename")); break;
-            case FileDialogKind::SelectFolder: args.push_back(keel::String("--getexistingdirectory")); break;
-        }
-        if (!opts.defaultPath.empty()) {
-            args.push_back(keel::String::from(opts.defaultPath));
-        } else {
-            args.push_back(keel::String("."));
-        }
-
-        const ExecCaptureResult exec = RunExternalDialogCommand(args);
-        if (exec.launched) {
-            result.supported = true;
-            if (exec.exitCode == 0) {
-                keel::usize pos = 0u;
-                while (pos < exec.output.size()) {
-                    keel::usize nl = exec.output.find('\n', pos);
-                    if (nl == keel::StringRef::npos) nl = exec.output.size();
-                    const keel::StringRef line = exec.output.substr(pos, nl - pos).trim();
-                    if (!line.empty()) {
-                        result.paths.push_back(keel::String::from(line));
-                    }
-                    pos = (nl < exec.output.size()) ? (nl + 1u) : exec.output.size();
-                }
-                result.accepted = !result.paths.empty();
-            }
-            return result;
-        }
-    }
-
-    return result;
+    return linux_detail::ShowLinuxFileDialog(opts);
 }
 
 MessageBoxChoice X11PlatformWindow::ShowMessageBox(const MessageBoxOptions& opts) {
-    keel::Array<keel::String> args;
-    args.push_back(keel::String("zenity"));
-    if (opts.buttons == MessageBoxButtons::Ok) {
-        switch (opts.icon) {
-            case MessageBoxIcon::Warning: args.push_back(keel::String("--warning")); break;
-            case MessageBoxIcon::Error:   args.push_back(keel::String("--error")); break;
-            default:                      args.push_back(keel::String("--info")); break;
-        }
-    } else {
-        args.push_back(keel::String("--question"));
-    }
-    if (!opts.title.empty()) {
-        args.push_back(keel::String("--title"));
-        args.push_back(keel::String::from(opts.title));
-    }
-    args.push_back(keel::String("--text"));
-    args.push_back(keel::String::from(opts.message));
-
-    const ExecCaptureResult exec = RunExternalDialogCommand(args);
-    if (!exec.launched) {
-        return MessageBoxChoice::Cancel;
-    }
-    if (exec.exitCode == 0) {
-        return (opts.buttons == MessageBoxButtons::YesNo || opts.buttons == MessageBoxButtons::YesNoCancel)
-            ? MessageBoxChoice::Yes
-            : MessageBoxChoice::Ok;
-    }
-    return (opts.buttons == MessageBoxButtons::YesNo) ? MessageBoxChoice::No : MessageBoxChoice::Cancel;
+    return linux_detail::ShowLinuxMessageBox(opts);
 }
 
 keel::StringRef X11PlatformWindow::GetPlatformName() const noexcept {
@@ -1828,6 +1675,7 @@ void X11PlatformWindow::Destroy() noexcept {}
 bool X11PlatformWindow::PumpEvents(Context&, bool, keel::i32) { return false; }
 void X11PlatformWindow::WakeUp() noexcept {}
 bool X11PlatformWindow::MakeContextCurrent() noexcept { return false; }
+void X11PlatformWindow::BeginFrameTarget(ICanvas&, Context&) {}
 void X11PlatformWindow::SwapBuffers() noexcept {}
 GlProcAddressFn X11PlatformWindow::GetGlProcAddressFn() const noexcept { return nullptr; }
 keel::i32 X11PlatformWindow::GetFramebufferWidth() const noexcept { return 0; }

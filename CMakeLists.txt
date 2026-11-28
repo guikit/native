@@ -35,6 +35,9 @@ endif()
 add_library(guikit_native STATIC
     src/guikit/native/emscripten_platform_window.cpp
     src/guikit/native/gl_es3_canvas.cpp
+    src/guikit/native/linux/linux_desktop_services.cpp
+    src/guikit/native/linux/linux_egl_context.cpp
+    src/guikit/native/wayland_platform_window.cpp
     src/guikit/native/win32_platform_window.cpp
     src/guikit/native/x11_platform_window.cpp
     src/guikit/native/native_backend.cpp
@@ -54,7 +57,7 @@ elseif (WIN32)
     target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_WIN32=1)
     target_link_libraries(guikit_native PRIVATE user32 gdi32 opengl32 shell32 ole32)
 elseif (UNIX AND NOT APPLE AND NOT ANDROID)
-    target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_X11=1)
+    target_compile_definitions(guikit_native PUBLIC GUIKIT_NATIVE_HAS_X11=1 GUIKIT_NATIVE_HAS_WAYLAND=1)
 endif()
 target_link_libraries(guikit_native PUBLIC guikit::core)
 if (GUIKIT_NATIVE_HAS_TEXT AND TARGET guikit::text)
